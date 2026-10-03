@@ -1,0 +1,3 @@
+/* System fonts only: the app never downloads fonts or other visual assets. */
+html { color-scheme: light; }
+@media (prefers-reduced-motion: reduce) { *,*::before,*::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }

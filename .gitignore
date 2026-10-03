@@ -1,0 +1,21 @@
+node_modules/
+.preview-data/
+*.log
+test-results/
+dist/
+coverage/
+playwright-report/
+
+# Local accounts, imported emails, student lists, and workspace backups.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.eml
+*.csv
+workspace.json*
+courses.json
+content-*.json
+.DS_Store
+Thumbs.db
