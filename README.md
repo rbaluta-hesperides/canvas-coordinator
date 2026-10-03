@@ -40,6 +40,8 @@ npm.cmd run test:electron
 
 Las plantillas emplean variables como `{{course_name}}`, `{{subject}}`, `{{day}}`, `{{month}}`, `{{year}}`, `{{session_name}}` y `{{preparation}}`. Puedes colocar cada parte de la fecha de forma independiente. Las variables pendientes impiden abrir un mensaje incompleto.
 
+En **Ajustes → Apariencia** puedes elegir **Claro**, **Oscuro** o **Sistema**. El botón de luna o sol de la barra superior permite cambiar rápidamente de modo. La preferencia se guarda en este equipo y se recupera al volver a abrir la aplicación.
+
 ## Conexión con Canvas
 
 El acceso principal es el inicio de sesión de Canvas en una ventana aislada de la aplicación. La dirección predeterminada es `https://hesperides.instructure.com`; puedes indicar otro dominio HTTPS de Canvas. Si el proveedor de tu universidad bloquea el acceso desde esa ventana, despliega **Acceso alternativo con token** e introduce un token personal autorizado para tu cuenta.

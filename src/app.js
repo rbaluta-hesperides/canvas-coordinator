@@ -13,7 +13,11 @@ const paths = {
   book: '<path d="M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Z"/><path d="M12 5v15"/>',
   template: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h4"/>',
   draft: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>',
-  settings: '<path d="m9 3-1 3-3 1 1 3-2 2 2 2-1 3 3 1 1 3h6l1-3 3-1-1-3 2-2-2-2 1-3-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/>',
+  settings: '<path d="M3 6h4m4 0h10M3 12h10m4 0h4M3 18h4m4 0h10"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="18" r="2"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42m0-14.14-1.42 1.42m-11.3 11.3-1.42 1.42"/>',
+  moon: '<path d="M20.9 13a9 9 0 0 1-9.9-9.9A9 9 0 1 0 20.9 13Z"/>',
+  monitor: '<rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/>',
+  chevron: '<path d="m9 6 6 6-6 6"/>',
   shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   arrow: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
@@ -67,6 +71,33 @@ const course = () => state.courses.find(c => c.id === state.composer?.courseId);
 const template = () => state.templates.find(t => t.id === state.composer?.templateId) || state.templates[0];
 const selectedStudents = () => (course()?.students || []).filter(s => state.composer.selectedStudentIds.includes(s.id));
 const isWeekly = () => (state.composer?.kind || template()?.kind) === 'weekly';
+
+function updateThemeControls() {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const label = dark ? 'Activar modo claro' : 'Activar modo oscuro';
+  document.querySelectorAll('[data-action="toggle-theme"]').forEach(el => {
+    el.innerHTML = icon(dark ? 'sun' : 'moon');
+    el.setAttribute('aria-label', label); el.title = label;
+  });
+  document.querySelectorAll('[data-theme-choice]').forEach(el => {
+    el.setAttribute('aria-pressed', String(el.dataset.themeChoice === document.documentElement.dataset.themePreference));
+  });
+}
+window.addEventListener('campus-theme-change', updateThemeControls);
+function chooseTheme(preference) {
+  if (!['light', 'dark', 'system'].includes(preference)) return;
+  state.settings.theme = preference;
+  window.campusTheme.apply(preference);
+  scheduleSave();
+}
+function appearancePanel() {
+  const choices = [
+    { value: 'light', name: 'Claro', detail: 'Un espacio luminoso', icon: 'sun' },
+    { value: 'dark', name: 'Oscuro', detail: 'Tonos suaves al trabajar', icon: 'moon' },
+    { value: 'system', name: 'Sistema', detail: 'Según tu dispositivo', icon: 'monitor' },
+  ];
+  return `<section class="panel appearance-panel"><div class="section-heading">${icon('sun')}<h2>Apariencia</h2></div><p>Elige cómo quieres ver tu espacio. La preferencia se guarda en este equipo.</p><div class="theme-options" role="group" aria-label="Tema de la aplicación">${choices.map(choice => `<button class="theme-option" data-action="choose-theme" data-theme-choice="${choice.value}" aria-pressed="${(state.settings.theme || 'system') === choice.value}">${icon(choice.icon)}<span><strong>${choice.name}</strong><small>${choice.detail}</small></span></button>`).join('')}</div></section>`;
+}
 
 function ensureWeeklyFields() {
   if (!isWeekly()) return;
@@ -190,13 +221,14 @@ function render() {
     <div class="workspace-label">TU ESPACIO DE TRABAJO</div>
     <nav aria-label="Navegación principal">${nav.map(n => `<button data-action="nav" data-view="${n.id}" aria-label="${n.name}" title="${n.name}" class="nav-item ${view === n.id ? 'active' : ''}">${icon(n.icon)}<span>${n.name}</span>${n.count !== undefined ? `<span class="nav-count">${n.count}</span>` : ''}</button>`).join('')}</nav>
     <div class="sidebar-bottom"><div class="local-card"><span class="local-icon">${icon('shield')}</span><strong>Tu trabajo se queda aquí</strong><p>Cursos, plantillas y borradores.<br>En tu ordenador, bajo tu control.</p><span class="status-dot"></span><span class="small"> Almacenamiento local</span></div>
-    <button data-action="nav" data-view="settings" aria-label="Ajustes" title="Ajustes" class="nav-item ${view === 'settings' ? 'active' : ''}">${icon('settings')}<span>Ajustes</span></button>
+    <button data-action="nav" data-view="settings" aria-label="Ajustes" title="Ajustes" ${view === 'settings' ? 'aria-current="page"' : ''} class="nav-item settings-link ${view === 'settings' ? 'active' : ''}"><span class="settings-icon">${icon('settings')}</span><span>Ajustes</span>${icon('chevron', 'settings-chevron')}</button>
     <div class="profile"><span class="avatar">${esc((state.settings.name || 'CO').split(' ').slice(0, 2).map(s => s[0]).join('').toUpperCase())}</span><span><strong>${esc(state.settings.name || 'Mi coordinación')}</strong><small>Espacio personal</small></span></div></div>
-  </aside><div class="workspace"><header class="topbar"><div class="breadcrumb">Coordinación académica <span>/</span> <strong>${({ compose: 'Crear correo', courses: 'Mis cursos', templates: 'Plantillas', drafts: 'Borradores', settings: 'Ajustes' })[view]}</strong></div><span class="local-pill">${icon('shield')} Solo en este equipo</span></header>
+  </aside><div class="workspace"><header class="topbar"><div class="breadcrumb">Coordinación académica <span>/</span> <strong>${({ compose: 'Crear correo', courses: 'Mis cursos', templates: 'Plantillas', drafts: 'Borradores', settings: 'Ajustes' })[view]}</strong></div><div class="topbar-actions"><span class="local-pill">${icon('shield')} Solo en este equipo</span>${button('toggle-theme', '', 'moon', 'icon-button theme-toggle', 'aria-label="Activar modo oscuro" title="Activar modo oscuro"')}</div></header>
   <div id="canvas-connection-bar">${canvasBar()}</div><main id="main">${view === 'compose' ? composeView() : view === 'courses' ? coursesView() : view === 'templates' ? templatesView() : view === 'drafts' ? draftsView() : settingsView()}</main>
   <footer class="app-footer"><span>Un poco menos de administración. Más tiempo para acompañar.</span><span>Campus <span class="muted">/</span> 0.1</span></footer></div>`;
   if (view === 'compose' && course()) updatePreview();
   updateSaveStatus();
+  updateThemeControls();
 }
 function pageHeading(eyebrow, title, subtitle, action = '') {
   return `<div class="page-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`;
@@ -446,7 +478,7 @@ function draftsView() {
   return pageHeading('RETOMA DONDE LO DEJASTE', 'Correos en preparación.', 'Borradores guardados en tu equipo, listos para cuando los necesites.', button('new-mail', 'Crear correo', 'plus', 'btn primary')) + (state.drafts.length ? `<div class="panel draft-list">${[...state.drafts].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(d => `<article class="draft-row"><span class="draft-icon">${icon('draft')}</span><div><h3>${esc(d.subject || 'Sin asunto')}</h3><p>${esc(d.courseName)} <span>·</span> ${new Date(d.updatedAt).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}</p></div><span class="tag">Local</span>${button('open-draft', 'Continuar', 'arrow', 'btn compact', `data-id="${esc(d.id)}"`)}${button('delete-draft', '', 'trash', 'icon-button', `data-id="${esc(d.id)}" aria-label="Eliminar borrador"`)}</article>`).join('')}</div>` : emptyState('Un espacio para tus próximos correos', 'Guarda un borrador desde el editor y vuelve a él cuando quieras.', button('nav', 'Preparar un correo', 'arrow', 'btn primary', 'data-view="compose"')));
 }
 function settingsView() {
-  return pageHeading('A TU MANERA', 'Tu espacio de coordinación.', 'Los pequeños detalles que hacen que cada correo sea tuyo.') + `${canvasSettingsPanel()}<div class="settings-layout"><section class="panel settings-panel"><div class="section-heading">${icon('people')}<h2>Tu perfil</h2></div><label class="field">Nombre del coordinador<input data-setting="name" value="${esc(state.settings.name)}" placeholder="Tu nombre"></label><label class="field">Tu dirección de correo<input type="email" data-setting="email" value="${esc(state.settings.email)}" placeholder="coordinacion@universidad.edu"></label><p class="field-help">Esta dirección aparecerá en «Para». Los estudiantes irán en CCO.</p><label class="field">Firma de tus correos<textarea data-setting="signature" rows="5">${esc(state.settings.signature)}</textarea></label><span class="save-status" id="save-status"></span></section><section class="panel privacy-panel"><span class="large-icon">${icon('shield')}</span><h2>Local por principio.</h2><p>El contenido de tus cursos, las direcciones de estudiantes, las plantillas y los borradores se guardan en este ordenador.</p><p>Al pulsar «Abrir borrador en Gmail», se comparten con Gmail el correo preparado y sus destinatarios. El envío lo haces tú, desde Gmail.</p><div class="data-location"><strong>Ubicación de tus datos</strong><code>${esc(info.dataPath || 'Carpeta de datos de Campus Coordinator')}</code></div><p class="small muted">Canvas se consulta solo para leer tus datos. No se modifican cursos ni se envían correos automáticamente.</p></section></div>`;
+  return pageHeading('A TU MANERA', 'Tu espacio de coordinación.', 'Los pequeños detalles que hacen que cada correo sea tuyo.') + `${appearancePanel()}${canvasSettingsPanel()}<div class="settings-layout"><section class="panel settings-panel"><div class="section-heading">${icon('people')}<h2>Tu perfil</h2></div><label class="field">Nombre del coordinador<input data-setting="name" value="${esc(state.settings.name)}" placeholder="Tu nombre"></label><label class="field">Tu dirección de correo<input type="email" data-setting="email" value="${esc(state.settings.email)}" placeholder="coordinacion@universidad.edu"></label><p class="field-help">Esta dirección aparecerá en «Para». Los estudiantes irán en CCO.</p><label class="field">Firma de tus correos<textarea data-setting="signature" rows="5">${esc(state.settings.signature)}</textarea></label><span class="save-status" id="save-status"></span></section><section class="panel privacy-panel"><span class="large-icon">${icon('shield')}</span><h2>Local por principio.</h2><p>El contenido de tus cursos, las direcciones de estudiantes, las plantillas y los borradores se guardan en este ordenador.</p><p>Al pulsar «Abrir borrador en Gmail», se comparten con Gmail el correo preparado y sus destinatarios. El envío lo haces tú, desde Gmail.</p><div class="data-location"><strong>Ubicación de tus datos</strong><code>${esc(info.dataPath || 'Carpeta de datos de Campus Coordinator')}</code></div><p class="small muted">Canvas se consulta solo para leer tus datos. No se modifican cursos ni se envían correos automáticamente.</p></section></div>`;
 }
 
 function showModal(title, content, actions = '', wide = false) {
@@ -558,6 +590,8 @@ async function handleFile(file) {
 }
 
 const actions = {
+  'toggle-theme'() { chooseTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); },
+  'choose-theme'(el) { chooseTheme(el.dataset.themeChoice); },
   nav(el) { view = el.dataset.view; closeModal(); render(); window.scrollTo(0, 0); },
   'close-modal': closeModal,
   'canvas-connect': canvasConnectionModal,
@@ -803,6 +837,7 @@ async function init() {
     const saved = await api.load(), details = await api.info();
     const upgrade = upgradeWorkspace(saved || createInitialState());
     info = details || {}; state = upgrade.state;
+    window.campusTheme.apply(state.settings.theme || 'system');
     if (state.composer && !state.courses.some(c => c.id === state.composer.courseId)) freshComposer();
     if (!state.composer) freshComposer();
     render();
