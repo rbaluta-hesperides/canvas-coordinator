@@ -2,24 +2,56 @@
 
 Una aplicación local que conecta con Canvas y prepara correos de coordinación académica por curso universitario, con sus asignaturas, estudiantes, clases y entregas. Las plantillas y los borradores se guardan en tu ordenador.
 
-## Ejecutar
+## Instalar en Mac
 
-Necesitas Node.js 22.12 o posterior y npm. En PowerShell, desde la carpeta del proyecto:
+Requiere **macOS 13 Ventura o posterior**, el mínimo de [Electron 44](https://www.electronjs.org/docs/latest/breaking-changes#removed-macos-12-support). La aplicación instalada incluye todo lo necesario; no necesitas Node.js.
+
+1. Descarga el `.dmg` de [GitHub Releases](https://github.com/rbaluta-hesperides/canvas-coordinator/releases): **arm64** para Apple Silicon (M1, M2 y posteriores) o **x64** para Intel. Puedes comprobar el procesador en ** → Acerca de este Mac**.
+2. Abre el archivo y arrastra **Campus Coordinator** a **Aplicaciones**.
+3. Abre la aplicación desde **Aplicaciones** y conecta tu cuenta de Canvas. También se publica un `.zip` con la misma aplicación para cada arquitectura.
+
+Estas versiones tienen firma local *ad hoc*, sin certificado Developer ID ni notarización de Apple. Si macOS indica que no puede verificar el desarrollador, tras intentar abrirla puedes autorizar esta aplicación en **Ajustes del Sistema → Privacidad y seguridad → Abrir igualmente**, siguiendo las [instrucciones de Apple](https://support.apple.com/es-es/102445). No cambies la protección general del Mac. En equipos gestionados por la universidad puede ser necesaria la intervención de su administrador.
+
+## Ejecutar desde el código fuente
+
+Necesitas Node.js 22.12 o posterior y npm. Descarga o clona el repositorio y abre una terminal en su carpeta.
+
+En **Windows**, desde PowerShell:
 
 ```powershell
-npm.cmd install
+npm.cmd ci
 npm.cmd start
 ```
 
 También puedes usar `ABRIR.bat` para iniciar la aplicación en Windows.
 
-Para abrir la vista previa local en el navegador:
+En **Mac**:
+
+```sh
+npm ci
+npm start
+```
+
+También puedes abrir `ABRIR.command` con doble clic: comprueba Node.js e instala las dependencias cuando faltan. Si la descarga del código perdió el permiso de ejecución, ejecuta `chmod +x ABRIR.command` desde su carpeta. Si usas un gestor de versiones de Node que solo se carga en tu terminal, inicia la aplicación con `npm start` desde esa terminal.
+
+Para generar los instaladores desde un Mac:
+
+```sh
+npm ci
+npm run dist:mac
+```
+
+Se generan `.dmg` y `.zip` para Apple Silicon e Intel en `dist/`, con nombres como `Campus-Coordinator-0.2.0-arm64.dmg`. `npm run pack:mac` prepara la aplicación sin crear los instaladores. Las compilaciones distribuidas contienen únicamente el código y los recursos de la aplicación; los datos locales y las credenciales quedan fuera.
+
+Para abrir la vista previa local en el navegador, en Windows:
 
 ```powershell
 npm.cmd run preview
 ```
 
 La vista previa se sirve en `http://127.0.0.1:4173`; sus datos están separados de los de la aplicación de escritorio. Para conectar una cuenta real de Canvas o seleccionar una carpeta local de CanvasManager, usa la aplicación de escritorio.
+
+En Mac, usa `npm run preview`. Los demás comandos de npm también funcionan sustituyendo `npm.cmd` por `npm`.
 
 Para ejecutar las pruebas:
 
@@ -86,6 +118,8 @@ La aplicación contacta con Canvas y con el proveedor de acceso de tu universida
 
 Los datos de los cursos, estudiantes, plantillas y borradores permanecen en este equipo. No hay servidor propio, alojamiento público de datos ni analítica. En escritorio se guardan en `workspace.json` dentro de la carpeta de datos de Electron (`app.getPath('userData')`); también se conserva una copia local `.bak`. La vista previa usa `.preview-data/workspace.json` dentro del proyecto. Estos archivos de trabajo no están cifrados; dependen de los permisos de tu cuenta y del disco. Las copias de seguridad contienen los datos de los estudiantes: guárdalas en una ubicación privada.
 
+En Mac, la carpeta de datos predeterminada es `~/Library/Application Support/Campus Coordinator/`. Puedes abrirla desde **Finder → Ir → Ir a la carpeta**. Mover o actualizar la aplicación en **Aplicaciones** conserva ese espacio de trabajo.
+
 La configuración de conexión se guarda por separado en `canvas-connection.json`. Cuando el sistema ofrece almacenamiento seguro, Electron `safeStorage` cifra el token o la copia de las cookies de Canvas con la protección del sistema operativo. Si ese cifrado no está disponible, el token permanece únicamente en memoria y hay que volver a introducirlo al reiniciar. El inicio de sesión utiliza un perfil de navegador separado, con su propio almacenamiento de cookies. Las credenciales no se incorporan a los cursos, las plantillas ni los borradores.
 
 La opción de Gmail abre una ventana de redacción mediante una URL. No envía el correo automáticamente ni garantiza que Gmail lo haya guardado como borrador mediante una API. Gmail recibe el contenido y las direcciones al abrir esa opción; revísalos antes de enviar. Los límites prácticos de longitud de las URL pueden afectar a mensajes extensos o listas grandes: utiliza la opción de copiar y pegar cuando corresponda.
@@ -93,6 +127,8 @@ La opción de Gmail abre una ventana de redacción mediante una URL. No envía e
 ## Importación local opcional
 
 Como alternativa a la conexión directa, puedes importar archivos existentes de CanvasManager. Su caché suele estar en `%APPDATA%\Canvas Manager\cache\canvas` o `%APPDATA%\canvas-manager\cache\canvas`. Una carpeta compatible contiene `courses.json` y archivos `content-{id}.json` para los cursos. Los contenidos importados deben corresponder al mismo usuario de la caché. Esta importación lee únicamente datos locales, sin copiar las credenciales de CanvasManager.
+
+En Mac se buscan las carpetas `~/Library/Application Support/Canvas Manager/cache/canvas` y `~/Library/Application Support/canvas-manager/cache/canvas`; también puedes seleccionar otra ubicación.
 
 Puedes importar estudiantes desde un CSV con columnas `id`, `name` y `email`; también se admiten los encabezados en español. Por ejemplo:
 

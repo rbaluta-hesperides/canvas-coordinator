@@ -1,7 +1,7 @@
 {
   "name": "canvas-coordinator",
   "productName": "Campus Coordinator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local workspace for university course coordination and email templates",
   "private": true,
   "type": "module",
@@ -12,11 +12,16 @@
     "preview": "node scripts/preview.mjs",
     "test": "node --test tests/*.test.js",
     "test:ui": "playwright test",
-    "test:electron": "node tests/electron-smoke.mjs"
+    "test:electron": "node tests/electron-smoke.mjs",
+    "pack:mac": "electron-builder --mac --dir --publish never",
+    "dist:mac": "electron-builder --mac --arm64 --x64 --publish never"
   },
-  "engines": { "node": ">=22.12" },
+  "engines": {
+    "node": ">=22.12"
+  },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "electron": "44.3.0",
-    "@playwright/test": "^1.58.2"
+    "electron-builder": "26.15.3"
   }
 }

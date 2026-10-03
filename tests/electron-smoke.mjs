@@ -21,10 +21,16 @@ delete env.ELECTRON_RUN_AS_NODE;
 let app;
 const errors = [];
 try {
-  app = await electron.launch({ args: [root], env, timeout: 45000,
-    ...(process.env.COORDINATOR_ELECTRON_PATH ? { executablePath: process.env.COORDINATOR_ELECTRON_PATH } : {}) });
-  assert.equal(path.resolve(await app.evaluate(({ app }) => app.getAppPath())), root, 'Electron must load the coordinator project.');
-  const page = await app.firstWindow();
+  const packaged = process.env.COORDINATOR_PACKAGED_APP;
+  const executablePath = packaged || process.env.COORDINATOR_ELECTRON_PATH;
+  app = await electron.launch({ args: packaged ? [] : [root], env, timeout: 45000,
+    ...(executablePath ? { executablePath } : {}) });
+  const appInfo = await app.evaluate(({ app }) => ({ path: app.getAppPath(), packaged: app.isPackaged }));
+  if (packaged) {
+    assert.equal(appInfo.packaged, true, 'The installed bundle must run without the source checkout.');
+    assert.equal(path.basename(appInfo.path), 'app.asar');
+  } else assert.equal(path.resolve(appInfo.path), root, 'Electron must load the coordinator project.');
+  let page = await app.firstWindow();
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForSelector('h1');
   assert.match(await page.locator('h1').innerText(), /correo/);
@@ -35,6 +41,13 @@ try {
   assert.equal((await page.evaluate(() => window.coordinator.canvasStatus())).connected, false);
   assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
   assert.equal(await page.evaluate(() => typeof window.process), 'undefined');
+  if (process.platform === 'darwin') {
+    const roles = await app.evaluate(({ Menu }) => {
+      const collect = menu => menu.items.flatMap(item => [item.role?.toLowerCase(), ...(item.submenu ? collect(item.submenu) : [])]);
+      return collect(Menu.getApplicationMenu());
+    });
+    for (const role of ['quit', 'close', 'copy', 'paste', 'selectall', 'undo']) assert.ok(roles.includes(role), `Native Mac menu needs ${role}.`);
+  }
   const preferences = await app.evaluate(({ BrowserWindow }) => {
     const prefs = BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();
     return { sandbox: prefs.sandbox, contextIsolation: prefs.contextIsolation, nodeIntegration: prefs.nodeIntegration, webSecurity: prefs.webSecurity };
@@ -72,6 +85,10 @@ try {
   await page.evaluate(() => window.coordinator.copyText('Asunto: Clase\nCCO: student@example.edu\nTexto del correo.'));
   assert.match(await app.evaluate(() => globalThis.smokeCopiedText), /CCO: student@example.edu/);
   await assert.rejects(page.evaluate(() => window.coordinator.copyText('x'.repeat(1024 * 1024 + 1))), /demasiado grande/);
+  await app.evaluate(({ clipboard }) => {
+    clipboard.writeText = async () => { throw new Error('Synthetic clipboard failure'); };
+  });
+  await assert.rejects(page.evaluate(() => window.coordinator.copyText('Clipboard retry')), /Synthetic clipboard failure/);
 
   // Exercise the actual Canvas service/IPC/client using a fake dedicated-session transport.
   // All responses are synthetic; this test never contacts a real university.
@@ -160,12 +177,12 @@ try {
   await page.waitForSelector('h1');
   assert.match(await page.locator('.profile').innerText(), /Smoke coordinator/);
 
-  // A failed flush must keep the desktop window open.
+  // A failed flush must cancel Quit and keep the desktop window usable.
   await page.evaluate(() => window.coordinator.onBeforeClose(async () => {
     window.smokeCloseBlocked = true;
     return false;
   }));
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  await app.evaluate(({ app }) => app.quit());
   await page.waitForFunction(() => window.smokeCloseBlocked === true);
   assert.equal(app.windows().length, 1);
 
@@ -178,6 +195,22 @@ try {
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
   await closed;
   assert.equal(JSON.parse(await fs.readFile(saved.path, 'utf8')).settings.name, 'Flushed on native close');
+  if (process.platform === 'darwin') {
+    // Closing the final Mac window keeps the process alive; the Dock reopens it.
+    assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 0);
+    const reopened = app.waitForEvent('window');
+    await app.evaluate(({ app }) => app.emit('activate'));
+    page = await reopened;
+    page.on('pageerror', error => errors.push(error.message));
+    await page.waitForSelector('h1');
+    assert.match(await page.locator('.profile').innerText(), /Flushed on native close/);
+    await page.locator('[data-action="nav"][data-view="settings"]').click();
+    await page.locator('[data-setting="name"]').fill('Flushed on Command-Q');
+    const quit = app.waitForEvent('close', { timeout: 15000 });
+    await app.evaluate(({ app }) => { setTimeout(() => app.quit(), 0); });
+    await quit;
+    assert.equal(JSON.parse(await fs.readFile(saved.path, 'utf8')).settings.name, 'Flushed on Command-Q');
+  }
   assert.deepEqual(errors, []);
   console.log('Electron smoke passed: sandboxed renderer, isolated persistence/reload, live Canvas IPC/sync with synthetic responses, sandboxed login/cancellation, private credentials/disconnect, native cache import, Gmail BCC handoff/limits, blocked renderer network/popups, and save-on-close handshake.');
 } finally {

@@ -1,10 +1,10 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, session, shell } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
 import { WorkspaceStore, defaultCanvasCacheDirectory, importCanvasDirectory } from './store.js';
 import { buildGmailUrl } from '../src/domain.js';
 import { CANVAS_PARTITION, CanvasService } from './canvas-service.js';
+import { createWindowCloseGuard } from './window-close.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const rendererDirectory = path.resolve(directory, '..', 'src');
@@ -13,8 +13,12 @@ let window;
 let store;
 let canvas;
 let lastRecoveryNotice;
-let allowWindowClose = false;
-let closeRequestId = null;
+const closeGuard = createWindowCloseGuard({
+  requestSave: payload => window.webContents.send('coordinator:before-close', payload),
+  closeWindow: () => window.close(),
+  quitApp: () => app.quit(),
+  showWindow: () => { window.show(); window.focus(); },
+});
 // Optional alternate profile for isolated smoke tests or separate local workspaces.
 if (process.env.COORDINATOR_USER_DATA) app.setPath('userData', path.resolve(process.env.COORDINATOR_USER_DATA));
 const ownsWorkspace = app.requestSingleInstanceLock();
@@ -43,15 +47,7 @@ async function showRecoveryNotice() {
 function registerIpc() {
   ipcMain.on('coordinator:ready-to-close', (event, payload) => {
     try { trustedSender(event); } catch { return; }
-    if (!closeRequestId || payload?.requestId !== closeRequestId) return;
-    closeRequestId = null;
-    if (payload.success !== true) {
-      window.show();
-      window.focus();
-      return;
-    }
-    allowWindowClose = true;
-    window.close();
+    closeGuard.complete(payload);
   });
   const handle = (name, callback) => ipcMain.handle(`coordinator:${name}`, async (event, payload) => {
     trustedSender(event);
@@ -72,11 +68,11 @@ function registerIpc() {
   handle('canvas-connect', input => canvas.connect(input));
   handle('canvas-sync', options => canvas.sync(options));
   handle('canvas-disconnect', () => canvas.disconnect());
-  handle('copy-text', text => {
+  handle('copy-text', async text => {
     if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 1024 * 1024) {
       throw new Error('El texto no es válido o es demasiado grande para copiarlo (máximo 1 MB).');
     }
-    clipboard.writeText(text);
+    await clipboard.writeText(text);
     return { ok: true };
   });
   handle('import-canvas', async () => {
@@ -105,8 +101,7 @@ function registerIpc() {
 }
 
 function createWindow() {
-  allowWindowClose = false;
-  closeRequestId = null;
+  closeGuard.reset();
   window = new BrowserWindow({
     width: 1440, height: 940, minWidth: 1060, minHeight: 700,
     title: 'Campus Coordinator', backgroundColor: '#f6f5f1', show: false,
@@ -123,19 +118,30 @@ function createWindow() {
   window.webContents.on('will-redirect', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
   window.once('ready-to-show', () => { if (process.env.COORDINATOR_START_HIDDEN !== '1') window.show(); });
-  window.on('close', event => {
-    if (allowWindowClose) return;
-    event.preventDefault();
-    if (closeRequestId) return;
-    closeRequestId = randomUUID();
-    window.webContents.send('coordinator:before-close', { requestId: closeRequestId });
-  });
+  window.on('close', event => closeGuard.beforeClose(event));
   window.on('closed', () => { window = null; canvas?.dispose(); });
   window.loadURL(rendererUrl);
 }
 
 app.whenReady().then(() => {
   if (!ownsWorkspace) return;
+  if (process.platform === 'darwin') {
+    // Native roles provide standard Command shortcuts in both the editor and
+    // Canvas login windows without exposing reload or developer tools.
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { label: 'Archivo', submenu: [{ role: 'close', label: 'Cerrar ventana' }] },
+      { role: 'editMenu', label: 'Edición' },
+      { label: 'Visualización', submenu: [
+        { role: 'resetZoom', label: 'Tamaño real' },
+        { role: 'zoomIn', label: 'Acercar' },
+        { role: 'zoomOut', label: 'Alejar' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: 'Pantalla completa' },
+      ] },
+      { role: 'windowMenu', label: 'Ventana' },
+    ]));
+  }
   store = new WorkspaceStore(app.getPath('userData'));
   const rendererSession = session.defaultSession;
   rendererSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -163,8 +169,16 @@ app.whenReady().then(() => {
   });
   registerIpc();
   createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('activate', () => {
+    if (!window) createWindow();
+    else {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    }
+  });
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => canvas?.dispose());
+app.on('before-quit', () => closeGuard.beforeQuit());
+app.on('will-quit', () => canvas?.dispose());

@@ -1,0 +1,24 @@
+appId: com.campuscoordinator.desktop
+productName: Campus Coordinator
+asar: true
+directories:
+  output: dist
+files:
+  - electron/**/*.js
+  - electron/**/*.cjs
+  - src/**/*.js
+  - src/**/*.css
+  - src/**/*.html
+  - package.json
+artifactName: Campus-Coordinator-${version}-${arch}.${ext}
+mac:
+  category: public.app-category.education
+  minimumSystemVersion: '13.0.0'
+  identity: '-'
+  hardenedRuntime: false
+  notarize: false
+  target:
+    - dmg
+    - zip
+dmg:
+  title: Campus Coordinator

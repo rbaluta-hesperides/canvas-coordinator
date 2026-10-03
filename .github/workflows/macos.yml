@@ -1,0 +1,89 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            output: mac-arm64
+          - runner: macos-15-intel
+            arch: x64
+            output: mac
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npx playwright install chromium
+      - run: npm run test:ui
+      - run: npm run test:electron
+      - name: Build native installer
+        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify macOS bundle signature
+        run: codesign --verify --deep --strict --verbose=2 "dist/${{ matrix.output }}/Campus Coordinator.app"
+      - name: Test packaged application
+        run: npm run test:electron
+        env:
+          COORDINATOR_PACKAGED_APP: ${{ github.workspace }}/dist/${{ matrix.output }}/Campus Coordinator.app/Contents/MacOS/Campus Coordinator
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: Campus-Coordinator-macOS-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish macOS downloads
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Campus-Coordinator-macOS-*
+          merge-multiple: true
+          path: installers
+      - name: Publish tested installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cat > release-notes.txt <<'EOF'
+          Campus Coordinator para macOS 13 Ventura o posterior.
+
+          - Apple Silicon (M1, M2, M3 y posteriores): descarga el DMG arm64.
+          - Mac Intel: descarga el DMG x64.
+          - Abre el DMG y arrastra Campus Coordinator a Aplicaciones. No necesitas Node.js.
+
+          Esta versión usa firma local (ad hoc), sin certificado Developer ID ni notarización de Apple. Si macOS bloquea la apertura, usa Ajustes del Sistema → Privacidad y seguridad → Abrir igualmente para esta aplicación. [Instrucciones de Apple](https://support.apple.com/es-es/102445).
+
+          Los cursos, estudiantes, plantillas y borradores se guardan en el Mac. Las pruebas de esta versión usan únicamente datos sintéticos.
+          EOF
+          gh release create "$RELEASE_TAG" installers/*.dmg installers/*.zip --title "Campus Coordinator $RELEASE_TAG — macOS" --notes-file release-notes.txt --verify-tag
