@@ -1,15 +1,17 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, shell } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { WorkspaceStore, defaultCanvasCacheDirectory, importCanvasDirectory } from './store.js';
 import { buildGmailUrl } from '../src/domain.js';
+import { CANVAS_PARTITION, CanvasService } from './canvas-service.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const rendererDirectory = path.resolve(directory, '..', 'src');
 const rendererUrl = pathToFileURL(path.join(rendererDirectory, 'index.html')).href;
 let window;
 let store;
+let canvas;
 let lastRecoveryNotice;
 let allowWindowClose = false;
 let closeRequestId = null;
@@ -66,6 +68,10 @@ function registerIpc() {
     return result;
   });
   handle('info', () => ({ dataPath: store.file, version: app.getVersion(), recoveryNotice: store.recoveryNotice }));
+  handle('canvas-status', () => canvas.status());
+  handle('canvas-connect', input => canvas.connect(input));
+  handle('canvas-sync', options => canvas.sync(options));
+  handle('canvas-disconnect', () => canvas.disconnect());
   handle('copy-text', text => {
     if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 1024 * 1024) {
       throw new Error('El texto no es válido o es demasiado grande para copiarlo (máximo 1 MB).');
@@ -124,7 +130,7 @@ function createWindow() {
     closeRequestId = randomUUID();
     window.webContents.send('coordinator:before-close', { requestId: closeRequestId });
   });
-  window.on('closed', () => { window = null; });
+  window.on('closed', () => { window = null; canvas?.dispose(); });
   window.loadURL(rendererUrl);
 }
 
@@ -146,9 +152,19 @@ app.whenReady().then(() => {
     callback({ cancel: !allowed });
   });
   rendererSession.on('will-download', event => event.preventDefault());
+  canvas = new CanvasService({ userData: app.getPath('userData'),
+    session: session.fromPartition(CANVAS_PARTITION), BrowserWindow, safeStorage,
+    getParent: () => window,
+    onProgress: progress => {
+      if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('coordinator:canvas-progress', progress);
+      }
+    },
+  });
   registerIpc();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('before-quit', () => canvas?.dispose());

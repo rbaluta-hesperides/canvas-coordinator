@@ -29,6 +29,10 @@ try {
   await page.waitForSelector('h1');
   assert.match(await page.locator('h1').innerText(), /correo/);
   assert.equal(await page.evaluate(() => typeof window.coordinator?.load), 'function');
+  for (const name of ['canvasStatus', 'canvasConnect', 'canvasSync', 'canvasDisconnect', 'onCanvasProgress']) {
+    assert.equal(await page.evaluate(key => typeof window.coordinator?.[key], name), 'function');
+  }
+  assert.equal((await page.evaluate(() => window.coordinator.canvasStatus())).connected, false);
   assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
   assert.equal(await page.evaluate(() => typeof window.process), 'undefined');
   const preferences = await app.evaluate(({ BrowserWindow }) => {
@@ -69,6 +73,84 @@ try {
   assert.match(await app.evaluate(() => globalThis.smokeCopiedText), /CCO: student@example.edu/);
   await assert.rejects(page.evaluate(() => window.coordinator.copyText('x'.repeat(1024 * 1024 + 1))), /demasiado grande/);
 
+  // Exercise the actual Canvas service/IPC/client using a fake dedicated-session transport.
+  // All responses are synthetic; this test never contacts a real university.
+  await app.evaluate(({ session }) => {
+    globalThis.smokeCanvasRequests = [];
+    session.fromPartition('persist:coordinator-canvas').fetch = async (url, init) => {
+      globalThis.smokeCanvasRequests.push({ url, method: init.method || 'GET', credentials: init.credentials });
+      const route = new URL(url).pathname;
+      let body = [];
+      if (route === '/api/v1/users/self/profile') body = { id: 41, name: 'Canvas coordinator', primary_email: 'coordinator@example.edu' };
+      else if (route === '/api/v1/courses') body = [{ id: 9, name: 'Live Canvas course', course_code: 'LIVE9' }];
+      else if (route === '/api/v1/courses/9/modules') body = [{ id: 91, name: 'Study unit', position: 1, items: [], items_count: 0 }];
+      else if (route === '/api/v1/courses/9/users') body = [{ id: 81, name: 'Canvas student', email: 'student@example.edu' }];
+      const response = new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      Object.defineProperty(response, 'url', { value: url });
+      return response;
+    };
+  });
+  await page.evaluate(() => {
+    window.smokeCanvasProgress = [];
+    window.smokeStopCanvasProgress = window.coordinator.onCanvasProgress(progress => window.smokeCanvasProgress.push(progress));
+  });
+  const connection = await page.evaluate(() => window.coordinator.canvasConnect({ baseUrl: 'https://canvas.example.edu', token: 'synthetic-test-token' }));
+  assert.equal(connection.connected, true);
+  assert.equal(connection.user.id, '41');
+  assert.equal(JSON.stringify(connection).includes('synthetic-test-token'), false);
+  const live = await page.evaluate(() => window.coordinator.canvasSync());
+  assert.equal(live.courses.length, 1);
+  assert.equal(live.courses[0].name, 'Live Canvas course');
+  assert.equal(live.courses[0].students[0].email, 'student@example.edu');
+  assert.ok((await page.evaluate(() => window.smokeCanvasProgress)).length > 0);
+  const requests = await app.evaluate(() => globalThis.smokeCanvasRequests);
+  assert.ok(requests.length >= 4);
+  assert.ok(requests.every(request => request.method === 'GET' && request.credentials === 'omit'));
+  assert.equal((await fs.readFile(path.join(profile, 'canvas-connection.json'), 'utf8')).includes('synthetic-test-token'), false);
+  const disconnected = await page.evaluate(() => window.coordinator.canvasDisconnect());
+  assert.equal(disconnected.connected, false);
+  assert.equal(disconnected.user, null);
+  await assert.rejects(fs.readFile(path.join(profile, 'canvas-connection.json')), { code: 'ENOENT' });
+  await page.evaluate(() => window.smokeStopCanvasProgress());
+
+  // Inspect a real embedded login window without loading remote content.
+  await app.evaluate(({ BrowserWindow, session }) => {
+    const canvasSession = session.fromPartition('persist:coordinator-canvas');
+    globalThis.smokeCanvasFetch = canvasSession.fetch;
+    canvasSession.fetch = async () => new Response('{}', { status: 401, headers: { 'Content-Type': 'application/json' } });
+    globalThis.smokeOriginalLoadUrl = BrowserWindow.prototype.loadURL;
+    BrowserWindow.prototype.loadURL = function(url, options) {
+      if (url === 'https://canvas.example.edu/login') return Promise.resolve();
+      return globalThis.smokeOriginalLoadUrl.call(this, url, options);
+    };
+  });
+  await page.evaluate(() => {
+    window.smokeCanvasLogin = window.coordinator.canvasConnect({ baseUrl: 'https://canvas.example.edu' });
+  });
+  await page.waitForFunction(async () => (await window.coordinator.canvasStatus()).connecting);
+  let loginPreferences;
+  for (let attempt = 0; attempt < 50 && !loginPreferences; attempt++) {
+    loginPreferences = await app.evaluate(({ BrowserWindow, session }) => {
+      const login = BrowserWindow.getAllWindows().find(win => win.webContents.session === session.fromPartition('persist:coordinator-canvas'));
+      if (!login) return null;
+      const prefs = login.webContents.getLastWebPreferences();
+      return { sandbox: prefs.sandbox, contextIsolation: prefs.contextIsolation, nodeIntegration: prefs.nodeIntegration, preload: prefs.preload || null };
+    });
+    if (!loginPreferences) await page.waitForTimeout(50);
+  }
+  assert.deepEqual(loginPreferences, { sandbox: true, contextIsolation: true, nodeIntegration: false, preload: null });
+  await app.evaluate(({ BrowserWindow, session }) => {
+    BrowserWindow.getAllWindows().find(win => win.webContents.session === session.fromPartition('persist:coordinator-canvas')).close();
+  });
+  const cancelledLogin = await page.evaluate(() => window.smokeCanvasLogin);
+  assert.equal(cancelledLogin.cancelled, true);
+  assert.equal(cancelledLogin.connecting, false);
+  await app.evaluate(({ BrowserWindow, session }) => {
+    BrowserWindow.prototype.loadURL = globalThis.smokeOriginalLoadUrl;
+    session.fromPartition('persist:coordinator-canvas').fetch = globalThis.smokeCanvasFetch;
+  });
+  await page.evaluate(() => window.coordinator.canvasDisconnect());
+
   assert.equal(await page.evaluate(async () => {
     try { await fetch('https://example.com/'); return 'allowed'; } catch { return 'blocked'; }
   }), 'blocked');
@@ -97,7 +179,7 @@ try {
   await closed;
   assert.equal(JSON.parse(await fs.readFile(saved.path, 'utf8')).settings.name, 'Flushed on native close');
   assert.deepEqual(errors, []);
-  console.log('Electron smoke passed: sandboxed renderer, isolated persistence/reload, native cache import, Gmail BCC handoff/limits, blocked renderer network/popups, and save-on-close handshake.');
+  console.log('Electron smoke passed: sandboxed renderer, isolated persistence/reload, live Canvas IPC/sync with synthetic responses, sandboxed login/cancellation, private credentials/disconnect, native cache import, Gmail BCC handoff/limits, blocked renderer network/popups, and save-on-close handshake.');
 } finally {
   if (app) await app.close().catch(() => {});
   await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

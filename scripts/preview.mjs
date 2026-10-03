@@ -56,6 +56,7 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
     if (url.pathname.startsWith('/api/')) {
       if (request.method === 'GET' && url.pathname === '/api/state') return json(response, 200, await store.load());
+      if (request.method === 'GET' && url.pathname === '/api/canvas/status') return json(response, 200, { connected: false, baseUrl: 'https://hesperides.instructure.com', supported: false });
       if (request.method === 'GET' && url.pathname === '/api/info') {
         return json(response, 200, { dataPath: store.file, version: packageMetadata.version, recoveryNotice: store.recoveryNotice });
       }
@@ -64,6 +65,7 @@ const server = http.createServer(async (request, response) => {
         if (origin !== `http://${request.headers.host}`) return json(response, 403, { error: 'A same-origin request is required to change local data.' });
         const body = await readBody(request);
         if (url.pathname === '/api/state') return json(response, 200, await store.save(body));
+        if (url.pathname.startsWith('/api/canvas/')) return json(response, 409, { error: 'La conexión directa con Canvas está disponible en la aplicación de escritorio. Ábrela con npm start e inicia sesión desde «Conectar Canvas».' });
         if (url.pathname === '/api/import-canvas') return json(response, 409, { error: 'La importación de carpetas está disponible en la aplicación de escritorio. Ábrela con npm start o importa aquí un archivo JSON de Canvas.' });
       }
       return json(response, 404, { error: 'This local API route does not exist.' });

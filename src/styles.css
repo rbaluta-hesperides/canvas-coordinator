@@ -232,6 +232,32 @@ code { font-family: Consolas, monospace; background: #eef2e5; padding: 3px 5px; 
 .roster-header { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); padding-top: 18px; margin-top: 10px; margin-bottom: 10px; }.roster-header h3 { font-size: 13px; }.roster-header .tag { margin-left: 4px; }.add-student-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 9px; margin: 18px 0; }.roster-list { max-height: 220px; overflow-y: auto; }.roster-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #edf1e4; }.roster-row strong { font-size: 11px; font-weight: 500; }.roster-row small { display: block; margin-top: 4px; font-size: 10px; color: #9daa8b; }.course-source { font-size: 10px; color: #94a17f; padding: 20px 0 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }.empty-list { text-align: center; padding: 20px; font-size: 11px; }.module-item { border-left: 2px solid #dce6cc; padding: 10px 16px; margin: 0 0 12px; }.module-item>div { display: flex; align-items: center; gap: 9px; }.module-item strong { font-size: 11px; }.module-item .icon { width: 15px; height: 15px; color: #8ca46c; }.module-item.live { background: #f1f5e9; border-color: #91aa74; border-radius: 0 5px 5px 0; }.module-item ul { margin: 10px 0 0 15px; padding: 0 0 0 10px; color: #96a680; font-size: 10px; line-height: 1.9; }
 #toast { position: fixed; z-index: 200; bottom: 25px; left: calc(50% + 115px); transform: translate(-50%, 20px); background: #2b4e3c; color: #f5f8ed; border: 1px solid #43674a; box-shadow: 0 7px 20px #1e382127; max-width: min(580px, 90vw); padding: 13px 20px; border-radius: 8px; font-size: 12px; line-height: 1.6; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; }#toast.visible { opacity: 1; transform: translate(-50%,0); }#toast.error { background: #814d3f; border-color: #a66651; }
 .loading,.startup-error { max-width: 660px; margin: 15vh auto; padding: 30px; text-align: center; }.startup-error h1 { font-size: 30px; margin: 20px 0; }.startup-error p { line-height: 1.8; margin: 15px 0; }
+.canvas-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 42px; background: #f1f5e9; border-bottom: 1px solid #dfe7d4; }
+.canvas-bar>div:first-child { display: flex; align-items: center; gap: 12px; min-width: 0; color: #526c41; }
+.canvas-bar strong { display: block; font-size: 12px; font-weight: 500; line-height: 1.6; }
+.canvas-bar small { display: block; color: #77866c; font-size: 10px; margin-top: 3px; }
+.canvas-bar .icon { flex-shrink: 0; }
+.canvas-bar .button-row { flex-shrink: 0; }
+.canvas-bar.connected { background: #f7faf3; }
+.connection-account { padding: 12px; border-radius: 6px; background: #f0f6e9; margin-bottom: 18px; color: #496c38; font-size: 12px; line-height: 1.8; }
+.canvas-settings { margin: 12px 0 28px; max-width: 950px; }
+.canvas-settings .section-heading { flex-wrap: wrap; }
+.canvas-settings p { color: #718161; font-size: 12px; line-height: 1.8; margin-bottom: 18px; }
+.canvas-settings .field { max-width: 320px; }
+.canvas-week { padding: 16px; border: 1px solid #d6e3c7; border-radius: 7px; background: #f1f6e9; margin-bottom: 24px; }
+.canvas-week .section-heading { margin-bottom: 12px; gap: 7px; }
+.canvas-week .section-heading strong { font-size: 12px; }
+.canvas-week>p { font-size: 11px; color: #6c7d5e; line-height: 1.8; margin: 10px 0 16px; }
+.canvas-week input[type=date] { min-width: 0; }
+.week-sources { margin: 0 0 18px; font-size: 11px; line-height: 1.8; }
+.week-sources summary { cursor: pointer; color: #506f38; margin-bottom: 10px; }
+.week-sources label { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.week-sources input { width: 16px; height: 16px; min-height: 16px; accent-color: var(--green); flex-shrink: 0; }
+.roster-notice { line-height: 1.8; }
+.student-row:has(input:disabled) { opacity: .75; cursor: default; }
+@media (max-width: 1180px) { .canvas-bar { padding-inline: 25px; } }
+@media (max-width: 800px) { .canvas-bar { align-items: flex-start; flex-direction: column; }.canvas-bar .button-row { flex-wrap: wrap; } }
+@media (max-width: 650px) { .canvas-bar { padding-inline: 17px; }.canvas-week { padding: 12px; } }
 /* Keep everyday form and email text comfortable at normal desktop scaling. */
 .field { font-size: 12px; color: #59694f; }
 input,select,textarea { font-size: 13px; }

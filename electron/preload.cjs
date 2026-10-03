@@ -11,6 +11,16 @@ contextBridge.exposeInMainWorld('coordinator', Object.freeze({
   load: () => ipcRenderer.invoke('coordinator:load'),
   save: state => ipcRenderer.invoke('coordinator:save', state),
   importCanvas: () => ipcRenderer.invoke('coordinator:import-canvas'),
+  canvasStatus: () => ipcRenderer.invoke('coordinator:canvas-status'),
+  canvasConnect: input => ipcRenderer.invoke('coordinator:canvas-connect', input),
+  canvasSync: options => ipcRenderer.invoke('coordinator:canvas-sync', options),
+  canvasDisconnect: () => ipcRenderer.invoke('coordinator:canvas-disconnect'),
+  onCanvasProgress: callback => {
+    if (typeof callback !== 'function') throw new TypeError('The Canvas progress handler must be a function.');
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('coordinator:canvas-progress', listener);
+    return () => ipcRenderer.removeListener('coordinator:canvas-progress', listener);
+  },
   openGmail: draft => ipcRenderer.invoke('coordinator:open-gmail', draft),
   info: () => ipcRenderer.invoke('coordinator:info'),
   copyText: text => ipcRenderer.invoke('coordinator:copy-text', text),

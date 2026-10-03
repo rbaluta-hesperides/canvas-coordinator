@@ -15,6 +15,7 @@ playwright-report/
 *.eml
 *.csv
 workspace.json*
+canvas-connection.json*
 courses.json
 content-*.json
 .DS_Store
