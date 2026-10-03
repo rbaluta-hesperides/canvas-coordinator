@@ -9,7 +9,7 @@ const courseId = id => `canvas:${baseUrl}:${user.id}:${id}`;
 const person = (id, email = `${id}@example.edu`) => ({ id, name: id, email });
 const localHour = date => new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(date));
 
-function academicSubjects(range, { completeWeek = false, examWeek = false } = {}) {
+function academicSubjects(range, { completeWeek = false, examWeek = false, sameDayActivities = false } = {}) {
   const definitions = [
     { id: 'finance', name: 'Finanzas II', semester: 'S5', students: [person('ana'), person('alicia')], hour: 16 },
     { id: 'metrics', name: 'Econometría', semester: 'S5', students: [person('ana-other-id', 'ana@example.edu'), person('bruno')], hour: 18, tutorial: true },
@@ -51,6 +51,11 @@ function academicSubjects(range, { completeWeek = false, examWeek = false } = {}
         startAt: `${dayAfter(5)}T10:00:00.000Z`, endAt: `${dayAfter(5)}T11:30:00.000Z`, description: '' });
       result.assignments.push({ id: 'finance-deadline', title: 'Caso práctico de valoración', dueAt: `${dayAfter(6)}T20:00:00.000Z`,
         description: '<p>Entregar el caso de valoración con los cálculos justificados.</p>', url: `${baseUrl}/courses/finance/assignments/deadline` });
+    }
+    if (sameDayActivities && subject.id === 'metrics') {
+      result.calendarEvents.push({ id: 'metrics-monday', courseId: id, title: 'Práctica guiada', type: 'event',
+        startAt: `${dayAfter(0)}T17:30:00.000Z`, endAt: `${dayAfter(0)}T18:15:00.000Z`,
+        description: '<p>Preparar el ejercicio de regresión.</p>', url: `${baseUrl}/courses/metrics/calendar` });
     }
     if (examWeek && subject.id === 'finance') {
       result.modules = [
@@ -219,6 +224,50 @@ test('third year contains its subjects and calendar timetable, with the deduplic
   expect(url.searchParams.get('bcc').split(',').sort()).toEqual(['alicia@example.edu', 'ana@example.edu', 'bruno@example.edu']);
   expect(url.searchParams.has('cc')).toBeFalsy();
   expect(url.searchParams.get('body')).toContain(hours);
+  await popup.close();
+});
+
+test('weekly email groups multiple subject activities beneath one heading per day and sends that same layout to Gmail', async ({ page, context }) => {
+  const model = await connectAcademicCanvas(page, { completeWeek: true, sameDayActivities: true });
+  await page.locator('#week-select').fill('2026-W41');
+  await expect.poll(() => model.ranges.at(-1)).toEqual({ startDate: '2026-10-05', endDate: '2026-10-11' });
+  await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
+  await expect(page.locator('#weekly-customization')).toHaveJSProperty('open', false);
+  await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(5);
+
+  const body = await page.locator('#email-body').textContent();
+  const headings = ['Lunes, 5 de octubre de 2026', 'Miércoles, 7 de octubre de 2026', 'Sábado, 10 de octubre de 2026', 'Domingo, 11 de octubre de 2026'];
+  for (const heading of headings) expect(body.split(heading)).toHaveLength(2);
+  const positions = headings.map(heading => body.indexOf(heading));
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  const monday = body.slice(positions[0], positions[1]);
+  expect(monday.match(/^• /gm)).toHaveLength(2);
+  expect(monday).toContain('• 18:00–19:30 (Europe/Madrid) · Finanzas II — Clase sincrónica 2');
+  expect(monday).toContain('• 19:30–20:15 (Europe/Madrid) · Econometría — Práctica guiada');
+  expect(monday.indexOf('18:00–19:30')).toBeLessThan(monday.indexOf('19:30–20:15'));
+  expect(monday).toContain('Trabajar hasta Sesión 4 | Preparación.');
+  expect(monday).toContain('Preparar el ejercicio de regresión.');
+  expect(body.match(/5 de octubre de 2026/g)).toHaveLength(1);
+  const wednesday = body.slice(positions[1], positions[2]);
+  expect(wednesday.match(/^• /gm)).toHaveLength(1);
+  expect(wednesday).toContain('Econometría — Tutoría de Econometría');
+  const saturday = body.slice(positions[2], positions[3]);
+  expect(saturday).toContain('12:00–13:30 (Europe/Madrid) · Finanzas II — Clase sincrónica 3');
+  expect(saturday).toContain('Sesión 6 | Riesgo y rentabilidad');
+  expect(body.slice(positions[3])).toContain('Caso práctico de valoración');
+  expect(body).not.toMatch(/https?:\/\/|www\.|\{\{|No hay sesiones|Sin trabajo adicional/i);
+  await expect(page.locator('[data-action="gmail"]')).toBeEnabled();
+  await page.screenshot({ path: test.info().outputPath('weekly-day-groups.png'), fullPage: true });
+
+  const handoffPromise = context.waitForEvent('request', { predicate: request => request.url().startsWith('https://mail.google.com/') });
+  const popupPromise = page.waitForEvent('popup');
+  await page.locator('[data-action="gmail"]').click();
+  const [handoff, popup] = await Promise.all([handoffPromise, popupPromise]);
+  const url = new URL(handoff.url());
+  expect(url.searchParams.get('body')).toBe(body);
+  expect(url.searchParams.get('to')).toBe(user.email);
+  expect(url.searchParams.get('bcc').split(',').sort()).toEqual(['alicia@example.edu', 'ana@example.edu', 'bruno@example.edu']);
+  expect(url.searchParams.has('cc')).toBeFalsy();
   await popup.close();
 });
 

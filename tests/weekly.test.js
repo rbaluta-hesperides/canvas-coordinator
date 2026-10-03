@@ -83,7 +83,7 @@ test('a calendar timetable appears once before the preparation and activity note
   assert.equal(text.split('18:00').length - 1, 1);
 });
 
-test('generated activities are chronological while repeated subjects and manual positions survive', () => {
+test('dated activities are chronological and undated notices remain separate from the day groups', () => {
   const early = { ...createWeeklyEntry(course, 'live-2'), generated: true, event: 'Clase del lunes', sortAt: '2026-10-05T18:00:00', scheduleLabel: 'Lunes · 18:00' };
   const late = { ...createWeeklyEntry(course, 'live-3'), generated: true, event: 'Clase del domingo', date: '2026-10-11', startTime: '09:00', scheduleLabel: 'Domingo · 09:00' };
   const middle = { ...createWeeklyEntry(course), event: 'Aviso de coordinación', preparationMode: 'none', notes: 'Nota añadida entre las actividades.' };
@@ -93,8 +93,9 @@ test('generated activities are chronological while repeated subjects and manual 
   assert.deepEqual(result.missing, []);
   assert.equal(result.entryCount, 3);
   assert.ok(result.text.indexOf('Clase del lunes') < result.text.indexOf('Aviso de coordinación'));
-  assert.ok(result.text.indexOf('Aviso de coordinación') < result.text.indexOf('Clase del domingo'));
-  assert.equal(result.text.split('• Econometría').length - 1, 3);
+  assert.ok(result.text.indexOf('Clase del domingo') < result.text.indexOf('Otros avisos'));
+  assert.ok(result.text.indexOf('Otros avisos') < result.text.indexOf('Aviso de coordinación'));
+  assert.equal(result.text.split('Econometría —').length - 1, 3);
   assert.equal(JSON.stringify(entries), before);
 });
 
@@ -115,7 +116,7 @@ test('editing calendar preparation does not prevent a rescheduled activity from 
   const other = { ...createWeeklyEntry(course, 'live-3'), generated: true, event: 'Clase anterior', sortAt: '2026-10-05T18:00:00' };
   const result = composeWeeklyAgenda([edited, other]);
   assert.ok(result.text.indexOf('Clase anterior') < result.text.indexOf('Clase reprogramada'));
-  assert.match(result.text, /Clase reprogramada: Preparación revisada por coordinación\./);
+  assert.match(result.text, /Clase reprogramada\n  Preparación revisada por coordinación\./);
   assert.equal(edited.generated, false);
 });
 
@@ -166,4 +167,51 @@ test('activities retain their timetable while links and absent preparation are o
   assert.match(withNotes.text, /Traed calculadora/);
   assert.match(withNotes.text, /Consultad la convocatoria/);
   assert.doesNotMatch(withNotes.text, /https?:/);
+});
+
+
+test('one heading per local day groups multiple subjects in time order with their preparation', () => {
+  const activity = (day, startTime, subject, event, preparation = '') => ({
+    date: day, startTime, endTime: '', timeZone: 'Europe/Madrid', subject, event,
+    preparationMode: 'manual', preparation, notes: 'https://canvas.example.edu/resource',
+  });
+  const later = activity('2026-10-05', '20:00', 'Econometría', 'Tutoría');
+  const nextDay = activity('2026-10-06', '18:00', 'Finanzas', 'Examen', 'Trabajar hasta Sesión 14.');
+  const earlier = { ...activity('2026-10-05', '18:00', 'Finanzas', 'Clase', 'Trabajar hasta Sesión 4.'),
+    scheduleLabel: 'lunes, 5 de octubre de 2026 · 18:00–19:30 (Europe/Madrid)' };
+  const entries = [later, nextDay, earlier], before = JSON.stringify(entries);
+  const result = composeWeeklyAgenda(entries);
+  assert.deepEqual(result.missing, []);
+  assert.equal(result.entryCount, 3);
+  assert.equal(result.text, 'Lunes, 5 de octubre de 2026\n\n'
+    + '• 18:00–19:30 (Europe/Madrid) · Finanzas — Clase\n  Trabajar hasta Sesión 4.\n\n'
+    + '• 20:00 (Europe/Madrid) · Econometría — Tutoría\n\n'
+    + 'Martes, 6 de octubre de 2026\n\n'
+    + '• 18:00 (Europe/Madrid) · Finanzas — Examen\n  Trabajar hasta Sesión 14.');
+  assert.equal(JSON.stringify(entries), before);
+});
+
+test('day headings preserve deadline scope, all-day labels, and an overnight end date', () => {
+  const base = { subject: 'Finanzas', date: '2026-12-31', preparationMode: 'none' };
+  const result = composeWeeklyAgenda([
+    { ...base, event: 'Actividad nocturna', startTime: '23:30', endTime: '01:00', endDate: '2027-01-01',
+      scheduleLabel: 'jueves, 31 de diciembre de 2026 · 23:30 – viernes, 1 de enero de 2027 · 01:00 (Europe/Madrid)' },
+    { ...base, event: 'Entrega', startTime: '18:00', scheduleLabel: 'Fecha publicada para una sección: jueves, 31 de diciembre de 2026 · 18:00 (Europe/Madrid)' },
+    { ...base, event: 'Jornada', allDay: true, scheduleLabel: 'jueves, 31 de diciembre de 2026 · Todo el día' },
+  ]);
+  assert.equal(result.text.split('Jueves, 31 de diciembre de 2026').length - 1, 1);
+  assert.match(result.text, /• Todo el día · Finanzas — Jornada/);
+  assert.match(result.text, /• Fecha publicada para una sección: 18:00 \(Europe\/Madrid\) · Finanzas — Entrega/);
+  assert.match(result.text, /23:30 – viernes, 1 de enero de 2027 · 01:00/);
+  assert.ok(result.text.indexOf('Jornada') < result.text.indexOf('Entrega'));
+  assert.ok(result.text.indexOf('Entrega') < result.text.indexOf('Actividad nocturna'));
+});
+
+test('a known date without a clock does not invent an hour and invalid dates stay undated', () => {
+  const result = composeWeeklyAgenda([
+    { subject: 'Finanzas', event: 'Fecha confirmada', date: '2026-10-05', preparationMode: 'none' },
+    { subject: 'Econometría', event: 'Aviso pendiente', date: '2026-02-30', preparationMode: 'none' },
+  ]);
+  assert.equal(result.text, 'Lunes, 5 de octubre de 2026\n\n• Finanzas — Fecha confirmada\n\nOtros avisos\n\n• Econometría — Aviso pendiente');
+  assert.doesNotMatch(result.text, /12:00|30 de febrero/);
 });
