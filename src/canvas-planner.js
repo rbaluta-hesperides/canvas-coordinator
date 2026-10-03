@@ -3,6 +3,9 @@ import { createWeeklyEntry } from './weekly.js';
 
 const fold = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const pad = number => String(number).padStart(2, '0');
+const DAY_MS = 86400000;
+const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') && Number(String(value).slice(0, 4)) > 0 &&
+  Number.isFinite(Date.parse(`${value}T12:00:00Z`)) && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 export function dayInZone(value, timeZone = 'Europe/Vienna') {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return '';
@@ -10,16 +13,48 @@ export function dayInZone(value, timeZone = 'Europe/Vienna') {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 export function nextCanvasWeek(now = new Date(), timeZone = 'Europe/Vienna') {
-  const date = new Date(`${dayInZone(now, timeZone)}T12:00:00Z`);
-  const untilMonday = (8 - date.getUTCDay()) % 7 || 7;
-  date.setUTCDate(date.getUTCDate() + untilMonday);
-  const startDate = date.toISOString().slice(0, 10);
-  date.setUTCDate(date.getUTCDate() + 4);
-  return { startDate, endDate: date.toISOString().slice(0, 10) };
+  return canvasWeekFromInput(shiftCanvasWeek(canvasWeekInput(now, timeZone), 1));
+}
+
+/** ISO weeks use the week containing Thursday; dates are calendar days, not UTC instants. */
+export function canvasWeekInput(value, timeZone = 'Europe/Vienna') {
+  const day = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : value == null || value === '' ? '' : dayInZone(value, timeZone);
+  if (!validDate(day)) throw new Error('La fecha de la semana no es válida.');
+  const thursday = new Date(`${day}T12:00:00Z`);
+  thursday.setUTCDate(thursday.getUTCDate() + 4 - (thursday.getUTCDay() || 7));
+  const year = thursday.getUTCFullYear();
+  if (year < 1 || year > 9999) throw new Error('La fecha de la semana no es válida.');
+  const firstDay = new Date(`${String(year).padStart(4, '0')}-01-01T12:00:00Z`);
+  const week = Math.floor((thursday - firstDay) / (7 * DAY_MS)) + 1;
+  return `${String(year).padStart(4, '0')}-W${pad(week)}`;
+}
+
+/** HTML week input → the complete Monday–Sunday period, including weekend activities. */
+export function canvasWeekFromInput(value) {
+  const match = /^(\d{4})-W(\d{2})$/.exec(String(value || ''));
+  if (!match || Number(match[1]) < 1 || Number(match[2]) < 1 || Number(match[2]) > 53) throw new Error('Elige una semana válida.');
+  const monday = new Date(`${match[1]}-01-04T12:00:00Z`);
+  monday.setUTCDate(monday.getUTCDate() + 1 - (monday.getUTCDay() || 7) + (Number(match[2]) - 1) * 7);
+  const startDate = monday.toISOString().slice(0, 10);
+  if (!validDate(startDate) || canvasWeekInput(startDate) !== value) throw new Error('Elige una semana válida.');
+  monday.setUTCDate(monday.getUTCDate() + 6);
+  const endDate = monday.toISOString().slice(0, 10);
+  if (!validDate(endDate)) throw new Error('Elige una semana válida.');
+  return { startDate, endDate };
+}
+
+export function shiftCanvasWeek(value, amount = 1) {
+  if (!Number.isInteger(amount)) throw new Error('El desplazamiento debe ser un número entero de semanas.');
+  const { startDate } = canvasWeekFromInput(value);
+  const next = new Date(`${startDate}T12:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + amount * 7);
+  if (!Number.isFinite(next.getTime())) throw new Error('La semana indicada está fuera del intervalo permitido.');
+  const result = canvasWeekInput(next.toISOString().slice(0, 10));
+  canvasWeekFromInput(result);
+  return result;
 }
 export function validateWeekRange(startDate, endDate) {
-  const valid = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') && Number.isFinite(Date.parse(`${value}T12:00:00Z`)) && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
-  if (!valid(startDate) || !valid(endDate)) throw new Error('Elige las fechas de inicio y fin del resumen.');
+  if (!validDate(startDate) || !validDate(endDate)) throw new Error('Elige las fechas de inicio y fin del resumen.');
   const days = (Date.parse(endDate) - Date.parse(startDate)) / 86400000;
   if (days < 0 || days > 90) throw new Error('El periodo debe ir de la fecha inicial a una fecha posterior, con un máximo de 90 días.');
 }

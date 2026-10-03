@@ -8,6 +8,7 @@ const field = (page, key) => page.locator(`[data-field="${key}"]`);
 async function loadDemo(page) {
   await page.goto('/');
   await page.getByRole('button', { name: /Explorar con cursos de ejemplo/ }).click();
+  await page.locator('[data-action="compose-mode"][data-mode="single"]').click();
   await expect(page.locator('#course-select')).toHaveValue('demo-philosophy');
 }
 

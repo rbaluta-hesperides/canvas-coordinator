@@ -74,13 +74,48 @@ test('manual events preserve teachers and paragraph notes without mutating entri
   assert.equal(JSON.stringify(entry), before);
 });
 
-test('a calendar timetable appears once in the email before the activity notes', () => {
+test('a calendar timetable appears once before the preparation and activity notes', () => {
   const entry = { ...createWeeklyEntry(course, 'live-2'),
     scheduleLabel: 'lunes, 5 de octubre de 2026 · 18:00–19:30 (Europe/Madrid)', notes: 'Traed dudas.' };
   const { text, missing } = composeWeeklyAgenda([entry]);
   assert.deepEqual(missing, []);
-  assert.match(text, /18:00–19:30 \(Europe\/Madrid\)\n  Traed dudas/);
+  assert.match(text, /Clase sincrónica 2:\n  lunes, 5 de octubre de 2026 · 18:00–19:30 \(Europe\/Madrid\)\n  Trabajar hasta Sesión 1\.\n  Traed dudas/);
   assert.equal(text.split('18:00').length - 1, 1);
+});
+
+test('generated activities are chronological while repeated subjects and manual positions survive', () => {
+  const early = { ...createWeeklyEntry(course, 'live-2'), generated: true, event: 'Clase del lunes', sortAt: '2026-10-05T18:00:00', scheduleLabel: 'Lunes · 18:00' };
+  const late = { ...createWeeklyEntry(course, 'live-3'), generated: true, event: 'Clase del domingo', date: '2026-10-11', startTime: '09:00', scheduleLabel: 'Domingo · 09:00' };
+  const middle = { ...createWeeklyEntry(course), event: 'Aviso de coordinación', preparationMode: 'none', notes: 'Nota añadida entre las actividades.' };
+  const entries = [late, middle, early];
+  const before = JSON.stringify(entries);
+  const result = composeWeeklyAgenda(entries);
+  assert.deepEqual(result.missing, []);
+  assert.equal(result.entryCount, 3);
+  assert.ok(result.text.indexOf('Clase del lunes') < result.text.indexOf('Aviso de coordinación'));
+  assert.ok(result.text.indexOf('Aviso de coordinación') < result.text.indexOf('Clase del domingo'));
+  assert.equal(result.text.split('• Econometría').length - 1, 3);
+  assert.equal(JSON.stringify(entries), before);
+});
+
+test('sorting generated entries keeps validation references tied to the original editor rows', () => {
+  const late = { ...createWeeklyEntry(course), generated: true, event: 'Examen domingo', date: '2026-10-11', startTime: '09:00' };
+  const early = { ...createWeeklyEntry(course, 'live-2'), generated: true, sortAt: '2026-10-05T18:00:00' };
+  const result = composeWeeklyAgenda([late, early]);
+  assert.equal(result.missing.length, 1);
+  assert.match(result.missing[0], /^Entrada 1: falta indicar la preparación/);
+  assert.ok(result.text.indexOf('Clase sincrónica 2') < result.text.indexOf('Examen domingo'));
+  assert.match(result.text, /Examen domingo: \{\{preparacion_1\}\}/);
+});
+
+test('editing calendar preparation does not prevent a rescheduled activity from moving chronologically', () => {
+  const edited = { ...createWeeklyEntry(course, 'live-2'), generated: false, sourceEventId: 'canvas-class',
+    event: 'Clase reprogramada', sortAt: '2026-10-09T18:00:00', preparation: 'Preparación revisada por coordinación.' };
+  const other = { ...createWeeklyEntry(course, 'live-3'), generated: true, event: 'Clase anterior', sortAt: '2026-10-05T18:00:00' };
+  const result = composeWeeklyAgenda([edited, other]);
+  assert.ok(result.text.indexOf('Clase anterior') < result.text.indexOf('Clase reprogramada'));
+  assert.match(result.text, /Clase reprogramada: Preparación revisada por coordinación\./);
+  assert.equal(edited.generated, false);
 });
 
 test('incomplete entries identify each missing field and cannot silently become sendable', () => {

@@ -1,7 +1,7 @@
 import { normalizeCourses, deriveSessions, parseStudentCsv, resolveTemplate, buildGmailUrl, isValidEmail } from './domain.js';
 import { createInitialState, createDemoCourses, weeklyTemplate, upgradeWorkspace, VARIABLES } from './seed.js';
 import { createWeeklyEntry, composeWeeklyAgenda, NO_ADDITIONAL_PREPARATION } from './weekly.js';
-import { nextCanvasWeek, planCanvasWeek, dayInZone, validateWeekRange } from './canvas-planner.js';
+import { nextCanvasWeek, canvasWeekFromInput, canvasWeekInput, shiftCanvasWeek, planCanvasWeek, dayInZone, validateWeekRange } from './canvas-planner.js';
 import { mergeCanvasCourse, reconcileCanvasRecipients, refreshEditedCalendarSchedule } from './canvas-workspace.js';
 import { academicCourses, academicCourseStudents, subjectsForAcademicCourse, subjectName } from './academic.js';
 
@@ -66,6 +66,7 @@ const api = window.coordinator || {
 let state, view = 'compose', activeModal = null, fileTask = null, info = {}, saveTimer, saving = Promise.resolve(), saveFailed = false, loadingFailed = false;
 let lastFocus = null, recipientSearch = '', courseSearch = '', revision = 0, savedRevision = 0;
 let canvasStatus = { connected: false, baseUrl: 'https://hesperides.instructure.com' }, canvasBusy = false, canvasProgress = '', canvasTimer;
+let weeklyCustomizationOpen = false, weekRangeOpen = false, weekSourcesOpen = false;
 const timeZone = () => state.settings.timeZone || 'Europe/Vienna';
 const liveCourse = value => value?.source?.type === 'canvas';
 const course = () => state.courses.find(c => c.id === state.composer?.courseId);
@@ -149,6 +150,19 @@ function fillWeekDates() {
   Object.assign(state.composer.fields, { week_start_day: String(Number(day)), week_end_day: String(Number(plan.endDate.slice(-2))), year,
     month: new Intl.DateTimeFormat('es-ES', { month: 'long', timeZone: 'UTC' }).format(new Date(`${year}-${month}-01T12:00:00Z`)) });
 }
+async function chooseCanvasWeek(week) {
+  if (canvasBusy) return;
+  const period = canvasWeekFromInput(week);
+  const previous = state.composer;
+  freshComposer(course(), template(), previous.academicCourseId);
+  state.composer.weeklyPlan = { ...period, courseIds: academicCourse()?.subjectIds || [course().id], subjectSelection: 'all', suppressed: [] };
+  state.composer.weeklyEntries = [];
+  state.composer.recipientMode = previous.recipientMode;
+  state.composer.selectedStudentIds = previous.selectedStudentIds.filter(id => recipientRoster().some(student => student.id === id));
+  for (const key of ['greeting', 'weekly_intro', 'closing']) if (previous.fields[key] !== undefined) state.composer.fields[key] = previous.fields[key];
+  fillWeekDates(); applyCanvasPlan(); scheduleSave(); render();
+  if (canvasStatus.connected || canvasStatus.mode) await syncCanvas({ notify: false });
+}
 function applyCanvasPlan() {
   const config = state.composer.weeklyPlan;
   if (!config || !isWeekly()) return;
@@ -184,7 +198,8 @@ function chooseTemplate(id) {
   if (state.composer.recipientMode === 'all') state.composer.selectedStudentIds = recipientRoster().filter(s => isValidEmail(s.email)).map(s => s.id);
 }
 
-function freshComposer(c = state.courses[0], t = state.templates[0], academicId) {
+function freshComposer(c = state.courses[0], t = state.templates.find(t => t.kind === 'weekly') || state.templates[0], academicId) {
+  weeklyCustomizationOpen = false; weekRangeOpen = false; weekSourcesOpen = false;
   const composer = { courseId: c?.id || '', templateId: t?.id || '', kind: t?.kind || 'single', sessionId: '', fields: {}, selectedStudentIds: (c?.students || []).filter(s => isValidEmail(s.email)).map(s => s.id), customSubject: null, customBody: null, draftId: null };
   state.composer = composer;
   composer.recipientMode = 'all';
@@ -280,7 +295,7 @@ function render() {
   </aside><div class="workspace"><header class="topbar"><div class="breadcrumb">Coordinación académica <span>/</span> <strong>${({ compose: 'Crear correo', courses: 'Mis cursos', templates: 'Plantillas', drafts: 'Borradores', settings: 'Ajustes' })[view]}</strong></div><div class="topbar-actions"><span class="local-pill">${icon('shield')} Solo en este equipo</span>${button('toggle-theme', '', 'moon', 'icon-button theme-toggle', 'aria-label="Activar modo oscuro" title="Activar modo oscuro"')}</div></header>
   <div id="canvas-connection-bar">${canvasBar()}</div><main id="main">${view === 'compose' ? composeView() : view === 'courses' ? coursesView() : view === 'templates' ? templatesView() : view === 'drafts' ? draftsView() : settingsView()}</main>
   <footer class="app-footer"><span>Un poco menos de administración. Más tiempo para acompañar.</span><span>Campus <span class="muted">/</span> 0.1</span></footer></div>`;
-  if (view === 'compose' && course()) updatePreview();
+  updateCanvasBar();
   updateSaveStatus();
   updateThemeControls();
   } finally { academicGroupSnapshot = null; }
@@ -295,7 +310,8 @@ function canvasBar() {
 }
 function updateCanvasBar() {
   if ($('#canvas-connection-bar')) $('#canvas-connection-bar').innerHTML = canvasBar();
-  document.querySelectorAll('[data-action="canvas-connect"],[data-action="canvas-sync"],[data-action="canvas-fill-week"],[data-week-range],[data-week-course]').forEach(el => { el.disabled = canvasBusy; });
+  document.querySelectorAll('[data-action="canvas-connect"],[data-action="canvas-sync"],[data-action="canvas-fill-week"],[data-action="shift-week"],[data-action="compose-mode"],#week-select,#academic-course-select,#course-select,[data-week-range],[data-week-course]').forEach(el => { el.disabled = canvasBusy; });
+  if (view === 'compose' && course()) updatePreview();
 }
 function canvasConnectionModal() {
   activeModal = { type: 'canvas' };
@@ -384,29 +400,37 @@ function canvasWeekControls() {
   const plan = state.composer.weeklyPlan;
   if (!liveCourse(course()) || !plan) return '';
   const available = groupSubjects().filter(c => liveCourse(c) && c.source.baseUrl === course().source.baseUrl && String(c.source.userId) === String(course().source.userId));
-  return `<div class="canvas-week"><div class="section-heading">${icon('book')}<strong>Semana desde Canvas</strong><span class="tag">Automático</span></div><p>Las clases, entregas y preparación se completan con el calendario y el orden de los módulos.</p><div class="two-fields"><label class="field">Inicio del calendario<input type="date" data-week-range="startDate" value="${esc(plan.startDate)}"></label><label class="field">Fin del calendario<input type="date" data-week-range="endDate" value="${esc(plan.endDate)}"></label></div><details class="week-sources"><summary>Asignaturas incluidas (${plan.courseIds.length})</summary><p class="small muted">Asignaturas de este curso académico, identificadas en Canvas. Desmarcar una asignatura cambia la agenda, no el grupo destinatario.</p>${available.map(c => `<label><input type="checkbox" data-week-course="${esc(c.id)}" ${plan.courseIds.includes(c.id) ? 'checked' : ''}><span>${esc(subjectName(c))}</span></label>`).join('')}</details>${button('canvas-fill-week', 'Actualizar semana desde Canvas', 'down', 'btn compact', canvasBusy ? 'disabled' : '')}${!state.composer.weeklyEntries.length ? '<p class="notice">No hay actividades publicadas para este periodo en las asignaturas seleccionadas.</p>' : ''}${(state.composer.planWarnings || []).map(w => `<p class="notice">${esc(w)}</p>`).join('')}</div>`;
+  const week = canvasWeekInput(plan.startDate);
+  const standard = canvasWeekFromInput(week);
+  const custom = standard.startDate !== plan.startDate || standard.endDate !== plan.endDate;
+  const date = value => new Intl.DateTimeFormat('es-ES', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${value}T12:00:00Z`));
+  return `<div class="canvas-week week-picker"><label class="field" for="week-select">Semana</label><div class="week-picker-row">${button('shift-week', '', 'chevron', 'btn week-previous', 'data-direction="-1" aria-label="Semana anterior"')}<input id="week-select" type="week" value="${esc(week)}" aria-describedby="week-dates">${button('shift-week', '', 'chevron', 'btn', 'data-direction="1" aria-label="Semana siguiente"')}</div><p id="week-dates">Del ${esc(date(plan.startDate))} al ${esc(date(plan.endDate))}${custom ? ' · Periodo personalizado' : ''}</p><p class="week-explanation">El borrador reúne todas las actividades de las asignaturas del curso, con su horario y el material que preparar.</p>${button('canvas-fill-week', 'Actualizar desde Canvas', 'down', 'btn compact', canvasBusy ? 'disabled' : '')}<details id="week-range-options" class="optional-fields" ${weekRangeOpen ? 'open' : ''}><summary>Ajustar periodo o asignaturas ${icon('edit')}</summary><div class="two-fields"><label class="field">Inicio del calendario<input type="date" data-week-range="startDate" value="${esc(plan.startDate)}"></label><label class="field">Fin del calendario<input type="date" data-week-range="endDate" value="${esc(plan.endDate)}"></label></div><details class="week-sources" ${weekSourcesOpen ? 'open' : ''}><summary>Asignaturas incluidas (${plan.courseIds.length})</summary><p class="small muted">Todas las asignaturas del curso se incluyen por defecto. Desmarcar una cambia la agenda, no los destinatarios.</p>${available.map(c => `<label><input type="checkbox" data-week-course="${esc(c.id)}" ${plan.courseIds.includes(c.id) ? 'checked' : ''}><span>${esc(subjectName(c))}</span></label>`).join('')}</details></details></div>`;
 }
+function weeklyOverview() {
+  const entries = state.composer.weeklyEntries || [];
+  const subjects = new Set(entries.map(entry => entry.courseId || entry.subject).filter(Boolean));
+  return `<section class="panel weekly-overview"><div class="section-heading">${icon('check')}<h2>Semana preparada</h2><span class="tag">${entries.length} actividades</span></div><p>${subjects.size} asignaturas con actividad. El borrador incluye clases, tutorías, exámenes y entregas en orden de fecha.</p>${!entries.length ? '<p class="notice">No hay actividades disponibles para este periodo. Actualiza Canvas o elige otra semana.</p>' : ''}${(state.composer.planWarnings || []).map(warning => `<p class="notice">${esc(warning)}</p>`).join('')}</section>`;
+}
+
 function emptyState(title, description, actions = '') {
   return `<div class="empty-state"><span class="empty-icon">${icon('book')}</span><h2>${title}</h2><p>${description}</p><div class="button-row">${actions}</div></div>`;
 }
 function composeView() {
-  const heading = pageHeading('MENOS TAREAS, MÁS UNIVERSIDAD', 'El próximo correo, listo.', 'Elige tu curso. Personaliza los detalles. Acompaña a tus estudiantes.', button('nav', 'Ver plantillas', 'template', 'btn subtle', 'data-view="templates"'));
+  const heading = pageHeading('COORDINACIÓN DE LA SEMANA', isWeekly() ? 'El correo de la semana, listo.' : 'El próximo correo, listo.', 'Elige curso y semana. Revisa el borrador y ábrelo en Gmail.', button('nav', 'Ver plantillas', 'template', 'btn subtle', 'data-view="templates"'));
   if (!course()) return heading + `<div class="welcome-panel"><div class="welcome-art">${icon('mail')}<span class="art-tag">Hecho para tu día a día</span></div><div class="welcome-content"><span class="eyebrow">EMPECEMOS POR TUS CURSOS</span><h2>De Canvas a un correo<br>con todo lo necesario.</h2><p>Inicia sesión en Canvas. Tus cursos, estudiantes y actividades se cargarán automáticamente para preparar los correos y el resumen de la semana.</p><div class="button-row">${button('canvas-connect', 'Conectar Canvas', 'external', 'btn primary', canvasBusy ? 'disabled' : '')}</div><button class="text-button demo-link" data-action="demo">Explorar con cursos de ejemplo ${icon('arrow')}</button><small>Los ejemplos están identificados y se pueden eliminar.</small></div></div><div class="feature-strip"><div>${icon('template')}<strong>Escribe una vez</strong><span>Reutiliza tus propias plantillas.</span></div><div>${icon('book')}<strong>El contexto de cada clase</strong><span>Preparación según el orden de Canvas.</span></div><div>${icon('shield')}<strong>Destinatarios en CCO</strong><span>Tú en «Para». Tus estudiantes, en privado.</span></div></div>`;
   const c = course(), sessions = deriveSessions(c), comp = state.composer;
   const session = sessions.find(s => s.id === comp.sessionId);
   const group = academicCourse();
   const schedule = calendarEntries(c).find(entry => comp.calendarEventId ? entry.sourceEventId === comp.calendarEventId : entry.sessionId === comp.sessionId);
-  return heading + `<div class="composer-modes" aria-label="Tipo de correo">${button('compose-mode', 'Correo de una clase', 'mail', `mode-button ${!isWeekly() ? 'selected' : ''}`, 'data-mode="single"')}${button('compose-mode', 'Resumen semanal', 'book', `mode-button ${isWeekly() ? 'selected' : ''}`, 'data-mode="weekly"')}<span>Una semana. Todas las asignaturas.</span></div><div class="composer-toolbar"><div class="workflow"><span class="workflow-step current"><b>1</b> Preparar</span><span class="workflow-line"></span><span class="workflow-step"><b>2</b> Revisar</span><span class="workflow-line"></span><span class="workflow-step"><b>3</b> Abrir en Gmail</span></div><span class="save-status" id="save-status"></span></div>
-    <div class="composer-layout"><div class="composer-form">
-      <section class="panel"><div class="section-heading"><span class="section-number">01</span><h2>Curso y plantilla</h2></div>
+  return heading + `<div class="composer-modes" aria-label="Tipo de correo">${button('compose-mode', 'Resumen semanal', 'book', `mode-button ${isWeekly() ? 'selected' : ''}`, 'data-mode="weekly"')}${button('compose-mode', 'Correo de una clase', 'mail', `mode-button ${!isWeekly() ? 'selected' : ''}`, 'data-mode="single"')}<span>Una semana. Todas las asignaturas.</span></div><div class="composer-toolbar"><div class="workflow"><span class="workflow-step current"><b>1</b> Preparar</span><span class="workflow-line"></span><span class="workflow-step"><b>2</b> Revisar</span><span class="workflow-line"></span><span class="workflow-step"><b>3</b> Abrir en Gmail</span></div><span class="save-status" id="save-status"></span></div>
+    <div class="composer-layout ${isWeekly() ? 'weekly-layout' : ''}"><div class="composer-form">
+      <section class="panel"><div class="section-heading"><span class="section-number">01</span><h2>${isWeekly() ? 'Curso y semana' : 'Curso y plantilla'}</h2></div>
         ${academicSelector()}
         ${!isWeekly() || !group ? `<label class="field">Asignatura<select id="course-select">${options(groupSubjects(), c.id, x => `${subjectName(x)}${x.isDemo ? ' · Ejemplo' : ''}`)}</select></label>` : ''}
         <div class="course-summary"><span class="course-monogram">${esc(group ? `${group.studyYear}º` : c.code?.slice(0, 3) || 'ASG')}</span><div><strong>${esc(group?.name || subjectName(c))}</strong><span>${group ? `${group.subjectIds.length} asignaturas · ` : ''}${recipientRoster().length} estudiantes${group?.academicPeriod ? ` · ${esc(group.academicPeriod)}` : ''}</span></div><span class="tag ${c.isDemo ? 'amber' : ''}">${c.isDemo ? 'Ejemplo' : liveCourse(c) ? 'Canvas' : 'Local'}</span></div>
-        <label class="field">Plantilla de correo<select id="template-select">${options(state.templates, comp.templateId)}</select></label>
-        <p class="field-help">${icon('template')}${esc(template()?.description || 'Personaliza el correo a partir de esta plantilla.')}</p>
-        ${isWeekly() && group ? '<p class="weekly-help">El resumen reúne las asignaturas del curso académico. Sus estudiantes se incluyen una sola vez en CCO.</p>' : ''}
+        ${isWeekly() ? canvasWeekControls() : `<label class="field">Plantilla de correo<select id="template-select">${options(state.templates, comp.templateId)}</select></label><p class="field-help">${icon('template')}${esc(template()?.description || '')}</p>`}
       </section>
-      ${isWeekly() ? weeklyComposerView() : `<section class="panel"><div class="section-heading"><span class="section-number">02</span><h2>Los detalles de la clase</h2><span class="tag">Editables</span></div>
+      ${isWeekly() ? weeklyOverview() : `<section class="panel"><div class="section-heading"><span class="section-number">02</span><h2>Los detalles de la clase</h2><span class="tag">Editables</span></div>
         <label class="field">${liveCourse(c) ? 'Clase o actividad del calendario' : 'Clase síncrona'}<select id="session-select">${calendarSelectionError() ? '<option value="" selected disabled>Actividad fuera del calendario actual</option>' : ''}<option value="">Introducir los datos manualmente</option>${options(classOptions(c), comp.calendarEventId ? `event:${comp.calendarEventId}` : comp.sessionId, s => s.title)}</select></label>
         ${schedule?.scheduleLabel ? `<p id="class-schedule" class="calendar-schedule">${icon('clock')}<span><strong>${schedule.scheduleSource === 'calendar' ? 'Horario del calendario' : 'Fecha del módulo'}</strong>${esc(schedule.scheduleLabel)}</span></p>` : ''}
         ${!classOptions(c).length ? '<p class="notice">No hay actividades de calendario ni clases publicadas en los módulos de esta asignatura.</p>' : ''}${comp.canvasNotice ? `<p class="notice">${esc(comp.canvasNotice)}</p>` : ''}
@@ -417,12 +441,13 @@ function composeView() {
         <details class="optional-fields"><summary>Más detalles <span>Enlace y notas adicionales</span>${icon('plus')}</summary>${field('meeting_link', 'Enlace de la clase', 'https://…')}${field('extra_notes', 'Notas adicionales', 'Información que quieras añadir', true)}</details>
       </section>`}
       <section class="panel"><div class="section-heading"><span class="section-number">03</span><h2>Destinatarios</h2><span class="tag">CCO</span></div><div class="recipient-summary"><span class="recipient-icon">${icon('people')}</span><div><strong id="recipient-count">${selectedStudents().length} de ${recipientRoster().length} estudiantes</strong><p>Solo tú apareces en «Para».</p></div>${button('recipients', 'Elegir', null, 'btn compact')}</div>${liveCourse(c) ? composerRosterNotice() : !c.students.length ? `<p class="notice">Añade estudiantes o importa su listado CSV desde Mis cursos.</p>${button('manage-course', 'Añadir estudiantes', 'plus', 'text-button', `data-id="${esc(c.id)}"`)}` : ''}</section>
-    </div><aside class="preview-column"><div class="preview-heading"><div><span class="preview-dot"></span><strong>Tu correo, en tiempo real</strong></div><span>VISTA PREVIA</span></div><div class="email-card"><div class="email-card-top"><span>${icon('mail')} Nuevo mensaje</span><div class="window-dots"><i></i><i></i><i></i></div></div><div class="email-meta"><div><span>Para</span><strong id="preview-to"></strong>${button('nav', 'Cambiar', null, 'text-button tiny', 'data-view="settings"')}</div><div><span>CCO</span><button class="recipient-chip" data-action="recipients" id="preview-bcc"></button><span class="private-label">${icon('shield')} Privados</span></div></div><div id="email-subject" class="email-subject"></div><div id="email-body" class="email-body"></div><div class="email-bottom"><span>Preparado con Campus</span>${button('edit-mail', 'Editar texto', 'edit', 'text-button')}</div></div><div id="preview-validation"></div><div class="preview-actions">${button('gmail', 'Abrir borrador en Gmail', 'external', 'btn primary gmail-button')}${button('save-draft', 'Guardar borrador', 'draft', 'btn')}${button('copy-mail', 'Copiar', 'copy', 'btn')}</div><p class="handoff-note">${icon('info')} Gmail se abrirá con el correo preparado en texto sin formato. Revísalo y envíalo desde allí cuando quieras.</p><div class="local-note">${icon('leaf')} Tus correos y borradores se guardan en este equipo.</div></aside></div>`;
+      ${isWeekly() ? `<details id="weekly-customization" class="weekly-customization" ${weeklyCustomizationOpen ? 'open' : ''}><summary>${icon('edit')}<span>Personalizar borrador<small>Plantilla, material, avisos y despedida</small></span>${icon('chevron')}</summary><div class="customization-content">${weeklyComposerView()}</div></details>` : ''}
+    </div><aside class="preview-column"><div class="preview-heading"><div><span class="preview-dot"></span><strong>${isWeekly() ? 'Borrador de la semana' : 'Tu correo, en tiempo real'}</strong></div><span>VISTA PREVIA</span></div><div class="email-card"><div class="email-card-top"><span>${icon('mail')} Nuevo mensaje</span><div class="window-dots"><i></i><i></i><i></i></div></div><div class="email-meta"><div><span>Para</span><strong id="preview-to"></strong>${button('nav', 'Cambiar', null, 'text-button tiny', 'data-view="settings"')}</div><div><span>CCO</span><button class="recipient-chip" data-action="recipients" id="preview-bcc"></button><span class="private-label">${icon('shield')} Privados</span></div></div><div id="email-subject" class="email-subject"></div><div id="email-body" class="email-body"></div><div class="email-bottom"><span>Preparado con Campus</span>${button('edit-mail', 'Editar texto', 'edit', 'text-button')}</div></div><div id="preview-validation"></div><div class="preview-actions">${button('gmail', 'Abrir borrador en Gmail', 'external', 'btn primary gmail-button')}${button('save-draft', 'Guardar borrador', 'draft', 'btn')}${button('copy-mail', 'Copiar', 'copy', 'btn')}</div><p class="handoff-note">${icon('info')} Gmail se abrirá con el correo preparado en texto sin formato. Revísalo y envíalo desde allí cuando quieras.</p><div class="local-note">${icon('leaf')} Tus correos y borradores se guardan en este equipo.</div></aside></div>`;
 }
 
 function weeklyComposerView() {
   return `<section class="panel weekly-details"><div class="section-heading"><span class="section-number">02</span><h2>La semana de tu curso</h2><span class="tag">Resumen semanal</span></div>
-    ${canvasWeekControls()}
+    <label class="field">Plantilla de correo<select id="template-select">${options(state.templates, state.composer.templateId)}</select></label>
     ${field('course_name', 'Curso en el asunto', 'Ej. 3º de Grado en Economía')}
     <div class="date-fields">${field('week_start_day', 'Desde el día', 'Ej. 5')}${field('week_end_day', 'Hasta el día', 'Ej. 9')}${field('month', 'Mes', 'Octubre')}${field('year', 'Año', '2026')}</div>
     <p class="field-help">Cada parte de la fecha es independiente. El asunto de esta plantilla utiliza los dos días.</p>
@@ -463,6 +488,7 @@ function updatePreview() {
   $('#preview-bcc').textContent = `${selectedStudents().length} estudiantes`;
   $('#recipient-count').textContent = `${selectedStudents().length} de ${recipientRoster().length} estudiantes`;
   const errors = composerDateErrors();
+  if (canvasBusy) errors.push('Actualizando las actividades y el material desde Canvas…');
   if (calendarSelectionError()) errors.push(calendarSelectionError());
   if (state.composer.academicSelectionError) errors.push(state.composer.academicSelectionError);
   if (isWeekly()) errors.push(...weeklyErrors());
@@ -695,9 +721,11 @@ const actions = {
   async 'canvas-fill-week'() {
     const plan = state.composer.weeklyPlan;
     validateWeekRange(plan.startDate, plan.endDate);
-    fillWeekDates();
     if (canvasStatus.connected || canvasStatus.mode) await syncCanvas();
     else { applyCanvasPlan(); scheduleSave(); render(); toast('Semana preparada con la última copia local de Canvas.'); }
+  },
+  'shift-week'(el) {
+    return chooseCanvasWeek(shiftCanvasWeek(canvasWeekInput(state.composer.weeklyPlan.startDate), Number(el.dataset.direction)));
   },
   demo() {
     const demo = createDemoCourses(); mergeCourses(demo);
@@ -752,6 +780,7 @@ const actions = {
   'reset-mail'() { state.composer.customSubject = null; state.composer.customBody = null; closeModal(); scheduleSave(); updatePreview(); },
   async 'copy-mail'() { const mail = resolvedMail(); const text = `Para: ${state.settings.email}\nCCO: ${selectedStudents().map(s => s.email).join(', ')}\nAsunto: ${mail.subject}\n\n${mail.body}`; if (api.copyText) await api.copyText(text); else await navigator.clipboard.writeText(text); toast('Correo copiado con las direcciones en CCO.'); },
   async gmail() {
+    if (canvasBusy) throw new Error('Espera a que termine la actualización de Canvas.');
     const mail = resolvedMail();
     if (mail.missing.length) throw new Error('Completa las variables pendientes antes de abrir Gmail.');
     if (!mail.subject.trim() || !mail.body.trim()) throw new Error('Añade el asunto y el mensaje.');
@@ -857,6 +886,11 @@ document.addEventListener('input', event => {
 });
 document.addEventListener('change', async event => {
   const el = event.target;
+  if (el.id === 'week-select') {
+    if (!el.value) return;
+    try { await chooseCanvasWeek(el.value); } catch (error) { toast(error.message, true); }
+    return;
+  }
   if (el.id === 'academic-course-select') {
     const group = academicGroups().find(group => group.id === el.value);
     const next = group ? subjectsForAcademicCourse(state.courses, group)[0] : state.courses.find(subject => !groupForSubject(subject));
@@ -870,12 +904,13 @@ document.addEventListener('change', async event => {
   }
   if (el.dataset.weekRange) {
     const plan = state.composer.weeklyPlan;
-    plan[el.dataset.weekRange] = el.value;
     try {
-      validateWeekRange(plan.startDate, plan.endDate);
+      const next = { ...plan, [el.dataset.weekRange]: el.value };
+      validateWeekRange(next.startDate, next.endDate);
+      Object.assign(plan, next);
       fillWeekDates(); applyCanvasPlan(); scheduleSave(); render();
       if (canvasStatus.connected) await syncCanvas({ notify: false });
-    } catch (error) { toast(error.message, true); }
+    } catch (error) { el.value = plan[el.dataset.weekRange]; toast(error.message, true); }
   }
   if (el.dataset.weekCourse) {
     const plan = state.composer.weeklyPlan, ids = new Set(plan.courseIds);
@@ -935,6 +970,12 @@ document.addEventListener('change', async event => {
   if (el.dataset.studentId) { state.composer.recipientMode = 'custom'; const set = new Set(state.composer.selectedStudentIds); el.checked ? set.add(el.dataset.studentId) : set.delete(el.dataset.studentId); state.composer.selectedStudentIds = [...set]; scheduleSave(); $('#selection-label').textContent = `${selectedStudents().length} seleccionados`; updatePreview(); }
   if (el.id === 'file-input') { try { await handleFile(el.files[0]); } catch (err) { toast(err.message, true); } }
 });
+document.addEventListener('toggle', event => {
+  if (!event.target.isConnected) return;
+  if (event.target.id === 'weekly-customization') weeklyCustomizationOpen = event.target.open;
+  if (event.target.id === 'week-range-options') weekRangeOpen = event.target.open;
+  if (event.target.classList.contains('week-sources')) weekSourcesOpen = event.target.open;
+}, true);
 document.addEventListener('focusin', event => { if (event.target.hasAttribute('data-token-target')) tokenTarget = event.target; });
 document.addEventListener('keydown', event => {
   if (!$('.modal')) return;

@@ -95,6 +95,23 @@ main { padding: 37px 42px 25px; flex: 1; max-width: 1680px; width: 100%; margin:
 .save-status .icon { width: 12px; height: 12px; }
 .composer-layout { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(330px, .95fr); gap: 26px; align-items: start; }
 .composer-form { display: flex; flex-direction: column; gap: 16px; }
+.weekly-layout { grid-template-columns: minmax(330px, .75fr) minmax(390px, 1.25fr); }
+.week-picker { margin: 20px 0 0; }
+.week-picker > .field { margin-bottom: 8px; }
+.week-picker-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) 36px; gap: 8px; }
+.week-picker-row .btn { padding: 8px; }
+.week-picker-row .week-previous .icon { transform: rotate(180deg); }
+.week-picker #week-dates { color: var(--text); font-weight: 600; line-height: 1.6; }
+.weekly-overview > p { font-size: 12px; line-height: 1.8; color: var(--muted); }
+.weekly-overview .section-heading { margin-bottom: 10px; }
+.weekly-customization > summary { display: flex; align-items: center; gap: 12px; padding: 19px 22px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); font-size: 12px; cursor: pointer; list-style: none; }
+.weekly-customization > summary::-webkit-details-marker { display: none; }
+.weekly-customization > summary > span { flex: 1; }
+.weekly-customization > summary small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.weekly-customization[open] > summary > .icon:last-child { transform: rotate(90deg); }
+.customization-content { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
+@media (max-width: 1100px) { .weekly-layout { grid-template-columns: minmax(300px, 1fr) minmax(310px, 1fr); } }
+@media (max-width: 800px) { .weekly-layout { grid-template-columns: 1fr; } }
 .panel { background: #fff; border: 1px solid var(--line); border-radius: 9px; padding: 23px; box-shadow: 0 2px 3px #20392702; }
 .section-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
 .section-heading h2 { font-size: 14px; flex: 1; }

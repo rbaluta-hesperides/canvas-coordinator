@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { createInitialState, createDemoCourses } from '../src/seed.js';
+import { openWeeklyCustomization } from './ui-helpers.js';
 
 const localOrigin = 'http://127.0.0.1:4174';
 const field = (page, key) => page.locator(`[data-field="${key}"]`);
@@ -18,6 +19,7 @@ async function readState(request) {
 async function openWeek(page) {
   await page.goto('/');
   await page.locator('[data-action="compose-mode"][data-mode="weekly"]').click();
+  await openWeeklyCustomization(page);
   await expect(entries(page)).toHaveCount(1);
   await field(page, 'course_name').fill('3º de Grado en Economía');
   await field(page, 'week_start_day').fill('5');

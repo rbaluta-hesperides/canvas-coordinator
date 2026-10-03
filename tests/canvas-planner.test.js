@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nextCanvasWeek, dayInZone, planCanvasWeek, canvasPlainText } from '../src/canvas-planner.js';
+import { nextCanvasWeek, dayInZone, planCanvasWeek, canvasPlainText, canvasWeekInput, canvasWeekFromInput, shiftCanvasWeek } from '../src/canvas-planner.js';
 
 const range = { startDate: '2026-10-05', endDate: '2026-10-09', timeZone: 'Europe/Vienna' };
 const fixture = () => ({ id: 'c1', name: 'Economía', subject: 'Finanzas', students: [], teachers: ['Docente de prueba'],
@@ -10,9 +10,66 @@ const fixture = () => ({ id: 'c1', name: 'Economía', subject: 'Finanzas', stude
     { id: 'l2', name: 'Clase sincrónica 2', position: 3, items: [] },
   ], calendarEvents: [{ id: 'e1', title: 'Clase sincrónica 1', startAt: '2026-10-05T16:00:00Z', endAt: '2026-10-05T17:30:00Z', description: '<p>Traed dudas.</p>' }], assignments: [] });
 
-test('next week uses coordinator timezone and a Monday-Friday range', () => {
-  assert.deepEqual(nextCanvasWeek(new Date('2026-10-03T10:00:00Z')), { startDate: '2026-10-05', endDate: '2026-10-09' });
+test('next week uses coordinator timezone and the full Monday-Sunday range', () => {
+  assert.deepEqual(nextCanvasWeek(new Date('2026-10-03T10:00:00Z')), { startDate: '2026-10-05', endDate: '2026-10-11' });
   assert.equal(dayInZone('2026-10-04T23:30:00Z'), '2026-10-05');
+  assert.deepEqual(nextCanvasWeek(new Date('2026-10-04T23:30:00Z'), 'Europe/Madrid'), { startDate: '2026-10-12', endDate: '2026-10-18' });
+  assert.deepEqual(nextCanvasWeek(new Date('2026-10-04T23:30:00Z'), 'UTC'), { startDate: '2026-10-05', endDate: '2026-10-11' });
+});
+
+test('ISO week inputs round-trip complete weeks across year boundaries and leap days', () => {
+  const examples = [
+    ['2026-W41', '2026-10-05', '2026-10-11'],
+    ['2020-W53', '2020-12-28', '2021-01-03'],
+    ['2026-W53', '2026-12-28', '2027-01-03'],
+    ['2025-W01', '2024-12-30', '2025-01-05'],
+    ['2024-W09', '2024-02-26', '2024-03-03'],
+  ];
+  for (const [week, startDate, endDate] of examples) {
+    assert.deepEqual(canvasWeekFromInput(week), { startDate, endDate });
+    for (let offset = 0; offset < 7; offset++) {
+      const date = new Date(`${startDate}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + offset);
+      assert.equal(canvasWeekInput(date.toISOString().slice(0, 10)), week);
+    }
+  }
+  assert.equal(canvasWeekInput('2024-02-29'), '2024-W09');
+});
+
+test('week selection rejects nonexistent week 53 and invalid dates instead of normalizing them', () => {
+  for (const value of ['', '2025-W53', '2021-W53', '2026-W00', '2026-W54', '2026-W1', 'W41', '0000-W01']) {
+    assert.throws(() => canvasWeekFromInput(value), /semana válida/, value);
+  }
+  for (const value of [null, '', 'not-a-date', '2026-02-29', '1900-02-29', '2026-04-31']) {
+    assert.throws(() => canvasWeekInput(value), /fecha.*válida/, String(value));
+  }
+  assert.throws(() => shiftCanvasWeek('2026-W41', 0.5), /entero/);
+});
+
+test('week stepping handles year transitions and daylight saving without omitting days', () => {
+  assert.equal(shiftCanvasWeek('2020-W53', 1), '2021-W01');
+  assert.equal(shiftCanvasWeek('2021-W01', -1), '2020-W53');
+  assert.equal(shiftCanvasWeek('2026-W41', 0), '2026-W41');
+  assert.deepEqual(canvasWeekFromInput('2026-W13'), { startDate: '2026-03-23', endDate: '2026-03-29' });
+  assert.deepEqual(canvasWeekFromInput('2026-W43'), { startDate: '2026-10-19', endDate: '2026-10-25' });
+  assert.equal(canvasWeekInput(new Date('2026-03-29T22:30:00Z'), 'Europe/Madrid'), '2026-W14');
+  assert.equal(canvasWeekInput(new Date('2026-03-29T22:30:00Z'), 'UTC'), '2026-W13');
+  assert.equal(canvasWeekInput(new Date('2026-10-25T23:30:00Z'), 'Europe/Madrid'), '2026-W44');
+});
+
+test('full week includes both weekend exam alternatives and Sunday deadlines in local time', () => {
+  const course = fixture();
+  course.calendarEvents.push(
+    { id: 'saturday-exam', title: 'Examen parcial — convocatoria del sábado', startAt: '2026-10-10T09:00:00Z', description: 'Preparar las sesiones 1 a 4.' },
+    { id: 'sunday-exam', title: 'Examen parcial — convocatoria del domingo', startAt: '2026-10-11T09:00:00Z', description: 'Preparar las sesiones 1 a 4.' },
+  );
+  course.assignments = [
+    { id: 'weekend', title: 'Entrega semanal', dueAt: '2026-10-11T21:30:00Z' },
+    { id: 'next-week', title: 'Entrega siguiente', dueAt: '2026-10-11T23:30:00Z' },
+  ];
+  const plan = planCanvasWeek([course], { ...canvasWeekFromInput('2026-W41'), timeZone: 'Europe/Madrid' });
+  assert.deepEqual(plan.entries.map(entry => entry.sourceEventId), ['e1', 'saturday-exam', 'sunday-exam', 'assignment-weekend']);
+  assert.match(plan.entries[2].scheduleLabel, /domingo, 11 de octubre/);
+  assert.equal(plan.entries[3].startTime, '23:30');
 });
 test('calendar fills class, teacher, local time and preparation without manually choosing a session', () => {
   const { entries, warnings } = planCanvasWeek([fixture()], range);

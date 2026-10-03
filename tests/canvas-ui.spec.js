@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { createInitialState } from '../src/seed.js';
 import { normalizeCourses } from '../src/domain.js';
+import { openWeeklyCustomization, openWeekSources, openWeekRangeOptions } from './ui-helpers.js';
 
 const localOrigin = 'http://127.0.0.1:4174';
 const baseUrl = 'https://canvas.example.edu';
@@ -75,6 +76,7 @@ async function mockCanvas(page, changes = {}) {
     } else if (pathname.endsWith('/sync')) {
       const range = route.request().postDataJSON();
       model.syncCalls.push(range);
+      if (model.syncGate) await model.syncGate;
       payload = { courses: syncedCourses(range, model), user, baseUrl, ...range, syncedAt: new Date().toISOString(), warnings: [] };
     } else if (pathname.endsWith('/disconnect')) {
       model.disconnectCalls++;
@@ -95,7 +97,7 @@ async function connectCanvas(page) {
   await expect(page.locator('#academic-course-select option:checked')).toContainText('3º de Grado en Economía');
   await expect(page.locator('#canvas-connection-bar')).toContainText(user.name);
   await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
-  await expect(page.locator('[data-action="canvas-fill-week"]')).toBeEnabled();
+  await expect(page.locator('#week-select')).toBeEnabled();
 }
 
 test.beforeEach(async ({ context, request }) => {
@@ -164,17 +166,22 @@ test('refresh removes withdrawn students while preserving a recipient subset and
   await page.locator('[data-student-id="bruno"]').uncheck();
   await page.getByRole('button', { name: 'Listo', exact: true }).click();
   await expect(page.locator('#recipient-count')).toHaveText('2 de 3 estudiantes');
+  await openWeeklyCustomization(page);
   const preparation = page.locator('.weekly-entry').first().locator('[data-weekly-field="preparation"]');
   await preparation.fill('Preparación revisada por coordinación: ejercicios 1 y 2.');
+  await page.locator('[data-field="week_start_day"]').fill('lunes acordado');
+  await page.locator('[data-field="month"]').fill('mes indicado por coordinación');
 
   model.students = [student('ana', 'Ana Canvas', 'ana@example.edu'), student('bruno', 'Bruno Canvas', 'bruno@example.edu'), student('diana', 'Diana Canvas', 'diana@example.edu')];
   model.classDescription = '<p>Información actualizada desde Canvas.</p>';
   model.classStartAt = `${model.syncCalls[0].startDate}T19:30:00.000Z`;
-  await page.locator('[data-action="canvas-sync"]').click();
+  await page.locator('[data-action="canvas-fill-week"]').click();
   await expect.poll(() => model.syncCalls.length).toBe(2);
   await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
   await expect(page.locator('#recipient-count')).toHaveText('1 de 3 estudiantes');
   await expect(preparation).toHaveValue('Preparación revisada por coordinación: ejercicios 1 y 2.');
+  await expect(page.locator('[data-field="week_start_day"]')).toHaveValue('lunes acordado');
+  await expect(page.locator('[data-field="month"]')).toHaveValue('mes indicado por coordinación');
   const movedStart = new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Vienna', hour: '2-digit', minute: '2-digit' }).format(new Date(model.classStartAt));
   await expect(page.locator('.weekly-entry').first().locator('.entry-schedule')).toContainText(movedStart);
   await expect(page.locator('#email-body')).toContainText(movedStart);
@@ -189,33 +196,64 @@ test('refresh removes withdrawn students while preserving a recipient subset and
   await expect.poll(async () => (await readState(request)).composer.selectedStudentIds).toEqual(['ana']);
 });
 
-test('week selection synchronizes every included subject and uses the academic course recipient union', async ({ page }) => {
+test('week selection synchronizes every included subject and uses the academic course recipient union', async ({ page, request }) => {
   const model = await mockCanvas(page, { includeSecondCourse: true });
   await connectCanvas(page);
   await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(3);
-  await page.locator('.week-sources summary').click();
+  await openWeeklyCustomization(page);
+  await openWeekSources(page);
   const extra = page.locator(`[data-week-course="${secondCourseId}"]`);
   await expect(extra).toBeChecked();
   await extra.uncheck();
   await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(2);
-  await page.locator('.week-sources summary').click();
+  await openWeekSources(page);
   await extra.check();
   await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(3);
   await expect(page.locator('#email-body')).toContainText('Tutoría de Estadística');
   await expect(page.locator('#recipient-count')).toHaveText('3 de 4 estudiantes');
-  const nextStart = new Date(`${model.syncCalls[0].startDate}T12:00:00Z`);
-  nextStart.setUTCDate(nextStart.getUTCDate() + 7);
-  const nextEnd = new Date(`${model.syncCalls[0].endDate}T12:00:00Z`);
-  nextEnd.setUTCDate(nextEnd.getUTCDate() + 7);
-  // Extend the end before advancing the start so the intermediate range remains valid.
-  await page.locator('[data-week-range="endDate"]').fill(nextEnd.toISOString().slice(0, 10));
-  await page.locator('[data-week-range="startDate"]').fill(nextStart.toISOString().slice(0, 10));
-  await page.locator('[data-action="canvas-fill-week"]').click();
-  await expect.poll(() => model.syncCalls.at(-1)).toEqual({ startDate: nextStart.toISOString().slice(0, 10), endDate: nextEnd.toISOString().slice(0, 10) });
+  await page.locator('#week-select').fill('2026-W42');
+  await expect.poll(() => model.syncCalls.at(-1)).toEqual({ startDate: '2026-10-12', endDate: '2026-10-18' });
+  await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
   await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(3);
+  await openWeekRangeOptions(page);
+  await page.locator('[data-week-range="startDate"]').fill('');
+  await expect(page.locator('[data-week-range="startDate"]')).toHaveValue('2026-10-12');
+  await expect(page.locator('#toast')).toContainText('Elige las fechas');
+  await expect.poll(async () => (await readState(request)).composer.weeklyPlan.startDate).toBe('2026-10-12');
+  await nav(page, 'settings').click();
+  await nav(page, 'compose').click();
+  await expect(page.locator('#week-select')).toHaveValue('2026-W42');
+  await page.reload();
+  await expect(page.locator('#week-select')).toHaveValue('2026-W42');
+  await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
   await page.locator('[data-action="recipients"]').first().click();
   await expect(page.locator('[data-student-id="other"]')).toBeChecked();
   await expect(page.locator('[data-student-id="ana"]')).toBeChecked();
+});
+
+test('week, academic course and Gmail remain locked during synchronization after navigating away and back', async ({ page }) => {
+  const model = await mockCanvas(page);
+  await connectCanvas(page);
+  let release;
+  model.syncGate = new Promise(resolve => { release = resolve; });
+  try {
+    await page.locator('[data-action="canvas-fill-week"]').click();
+    await expect.poll(() => model.syncCalls.length).toBe(2);
+    await expect(page.locator('#week-select')).toBeDisabled();
+    await expect(page.locator('#academic-course-select')).toBeDisabled();
+    await expect(page.locator('[data-action="gmail"]')).toBeDisabled();
+    await nav(page, 'settings').click();
+    await nav(page, 'compose').click();
+    await expect(page.locator('#week-select')).toBeDisabled();
+    await expect(page.locator('#academic-course-select')).toBeDisabled();
+    await expect(page.locator('[data-action="shift-week"][data-direction="-1"]')).toBeDisabled();
+    await expect(page.locator('[data-action="shift-week"][data-direction="1"]')).toBeDisabled();
+    await expect(page.locator('[data-action="gmail"]')).toBeDisabled();
+  } finally { release(); model.syncGate = null; }
+  await expect(page.locator('#week-select')).toBeEnabled();
+  await expect(page.locator('#academic-course-select')).toBeEnabled();
+  await expect(page.locator('[data-action="gmail"]')).toBeEnabled();
+  await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(2);
 });
 
 test('disconnect clears the saved connection while keeping the synchronized local courses and email', async ({ page, request }) => {
