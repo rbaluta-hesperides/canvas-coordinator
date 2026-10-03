@@ -32,6 +32,12 @@ test('two weekly classes for one subject retain their own Canvas cutoffs', () =>
   assert.equal(JSON.stringify(course), before);
 });
 
+test('weekly entries use the subject name without Canvas academic codes', () => {
+  const coded = { ...course, name: 'Econometría [G.EC | 26/27 | S5 | 2]', subject: 'Econometría [G.EC | 26/27 | S5 | 2]' };
+  assert.equal(createWeeklyEntry(coded, 'live-2').subject, 'Econometría');
+  assert.equal(createWeeklyEntry().subject, '');
+});
+
 test('unknown preparation is incomplete until explicitly marked as no additional work', () => {
   const entry = createWeeklyEntry(course, 'live-1');
   assert.equal(entry.preparationMode, 'manual');
@@ -66,6 +72,15 @@ test('manual events preserve teachers and paragraph notes without mutating entri
   assert.deepEqual(result.missing, []);
   assert.equal(result.text, '• Econometría — Tutoría de repaso, con Profesor de ejemplo: Traer las dudas.\n  Primera observación.\n  \n  Segunda observación.');
   assert.equal(JSON.stringify(entry), before);
+});
+
+test('a calendar timetable appears once in the email before the activity notes', () => {
+  const entry = { ...createWeeklyEntry(course, 'live-2'),
+    scheduleLabel: 'lunes, 5 de octubre de 2026 · 18:00–19:30 (Europe/Madrid)', notes: 'Traed dudas.' };
+  const { text, missing } = composeWeeklyAgenda([entry]);
+  assert.deepEqual(missing, []);
+  assert.match(text, /18:00–19:30 \(Europe\/Madrid\)\n  Traed dudas/);
+  assert.equal(text.split('18:00').length - 1, 1);
 });
 
 test('incomplete entries identify each missing field and cannot silently become sendable', () => {

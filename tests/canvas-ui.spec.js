@@ -20,7 +20,7 @@ async function readState(request) {
 function syncedCourses(range, model) {
   const savedAt = new Date().toISOString();
   const [course] = normalizeCourses([{
-    id: courseId, name: '3.º de Economía · Grupo Canvas', subject: 'Economía', code: 'ECO-CANVAS', students: model.students,
+    id: courseId, name: `Economía [G.EC | 26/27 | ${model.semester} | 2]`, subject: 'Economía', code: `G.EC | 26/27 | ${model.semester} | 2`, students: model.students,
     modules: [
       { id: 'lesson-1', name: 'Sesión 1 | Introducción', position: 1, items: [{ id: 'video-1', type: 'Page', title: 'Vídeo: Conceptos iniciales', position: 1 }] },
       { id: 'lesson-2', name: 'Sesión 2 | Oferta y demanda', position: 2, items: [{ id: 'video-2', type: 'Page', title: 'Vídeo: Equilibrio de mercado', position: 1 }] },
@@ -43,9 +43,10 @@ function syncedCourses(range, model) {
     syncWarnings: [], rosterAuthoritative: true, rosterComplete: model.students.every(person => person.email),
     missingEmailCount: model.students.filter(person => !person.email).length, preparationComplete: true,
   });
+  if (!model.includeClass) course.calendarEvents = course.calendarEvents.filter(event => event.id !== 'class-2');
   if (!model.includeSecondCourse) return [course];
   const [second] = normalizeCourses([{
-    id: secondCourseId, name: 'Estadística · Otro grupo', subject: 'Estadística', code: 'EST-CANVAS',
+    id: secondCourseId, name: 'Estadística [G.EC | 26/27 | S5 | 2]', subject: 'Estadística', code: 'G.EC | 26/27 | S5 | 2',
     students: [student('other', 'Otro grupo', 'otro-grupo@example.edu')], modules: [],
     source: { type: 'canvas', baseUrl, userId: user.id, canvasCourseId: '99', savedAt },
   }]);
@@ -60,7 +61,7 @@ function syncedCourses(range, model) {
 
 async function mockCanvas(page, changes = {}) {
   const model = { students: structuredClone(enrolled), classDescription: '<p>Traed las preguntas de esta semana.</p>',
-    includeSecondCourse: false, connected: false, connectCalls: [], syncCalls: [], disconnectCalls: 0, ...changes };
+    includeSecondCourse: false, includeClass: true, semester: 'S5', connected: false, connectCalls: [], syncCalls: [], disconnectCalls: 0, ...changes };
   const status = () => ({ supported: true, connected: model.connected, baseUrl, user: model.connected ? user : null,
     mode: model.connected ? 'session' : null, credentialStorage: model.connected ? 'encrypted' : null });
   await page.route('**/api/canvas/**', async route => {
@@ -91,7 +92,7 @@ async function connectCanvas(page) {
   await expect(page.getByRole('dialog', { name: 'Conectar con Canvas' })).toBeVisible();
   await expect(page.locator('#canvas-base-url')).toHaveValue(baseUrl);
   await page.locator('[data-action="canvas-login"]').click();
-  await expect(page.locator('#course-select')).toHaveValue(courseId);
+  await expect(page.locator('#academic-course-select option:checked')).toContainText('3º de Grado en Economía');
   await expect(page.locator('#canvas-connection-bar')).toContainText(user.name);
   await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
   await expect(page.locator('[data-action="canvas-fill-week"]')).toBeEnabled();
@@ -120,9 +121,11 @@ test('Canvas login automatically fills the weekly email, profile, preparation an
   await expect(page.locator('#email-body')).toContainText('Entrega: Trabajo individual');
   await expect(page.locator('#email-body')).toContainText('Resolver los ejercicios publicados en Canvas.');
   await expect(page.locator('#email-body')).toContainText('Profesora Canvas');
+  await expect(page.locator('[data-field="course_name"]')).toHaveValue('3º de Grado en Economía');
+  await expect(page.locator('.weekly-entry').first().locator('.entry-schedule')).toContainText(/\d\d:\d\d–\d\d:\d\d/);
   await expect(page.locator('#preview-to')).toHaveText(user.email);
   await expect(page.locator('#recipient-count')).toHaveText('2 de 3 estudiantes');
-  await expect(page.locator('.preview-column .roster-notice')).toContainText('No se incluyen en CCO');
+  await expect(page.locator('.preview-column .roster-notice').filter({ hasText: /no se incluyen en CCO/i })).toBeVisible();
   await expect(page.locator('[data-week-range="startDate"]')).toHaveValue(model.syncCalls[0].startDate);
   await expect(page.locator('[data-week-range="endDate"]')).toHaveValue(model.syncCalls[0].endDate);
 
@@ -166,11 +169,15 @@ test('refresh removes withdrawn students while preserving a recipient subset and
 
   model.students = [student('ana', 'Ana Canvas', 'ana@example.edu'), student('bruno', 'Bruno Canvas', 'bruno@example.edu'), student('diana', 'Diana Canvas', 'diana@example.edu')];
   model.classDescription = '<p>Información actualizada desde Canvas.</p>';
+  model.classStartAt = `${model.syncCalls[0].startDate}T19:30:00.000Z`;
   await page.locator('[data-action="canvas-sync"]').click();
   await expect.poll(() => model.syncCalls.length).toBe(2);
   await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
   await expect(page.locator('#recipient-count')).toHaveText('1 de 3 estudiantes');
   await expect(preparation).toHaveValue('Preparación revisada por coordinación: ejercicios 1 y 2.');
+  const movedStart = new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Vienna', hour: '2-digit', minute: '2-digit' }).format(new Date(model.classStartAt));
+  await expect(page.locator('.weekly-entry').first().locator('.entry-schedule')).toContainText(movedStart);
+  await expect(page.locator('#email-body')).toContainText(movedStart);
   await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(2);
   await page.locator('[data-action="recipients"]').first().click();
   await expect(page.locator('[data-student-id="carla"]')).toHaveCount(0);
@@ -182,16 +189,20 @@ test('refresh removes withdrawn students while preserving a recipient subset and
   await expect.poll(async () => (await readState(request)).composer.selectedStudentIds).toEqual(['ana']);
 });
 
-test('week selection synchronizes the chosen range and adding another subject keeps recipients from the selected course', async ({ page }) => {
+test('week selection synchronizes every included subject and uses the academic course recipient union', async ({ page }) => {
   const model = await mockCanvas(page, { includeSecondCourse: true });
   await connectCanvas(page);
-  await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(2);
+  await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(3);
   await page.locator('.week-sources summary').click();
   const extra = page.locator(`[data-week-course="${secondCourseId}"]`);
+  await expect(extra).toBeChecked();
+  await extra.uncheck();
+  await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(2);
+  await page.locator('.week-sources summary').click();
   await extra.check();
   await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(3);
   await expect(page.locator('#email-body')).toContainText('Tutoría de Estadística');
-  await expect(page.locator('#recipient-count')).toHaveText('2 de 3 estudiantes');
+  await expect(page.locator('#recipient-count')).toHaveText('3 de 4 estudiantes');
   const nextStart = new Date(`${model.syncCalls[0].startDate}T12:00:00Z`);
   nextStart.setUTCDate(nextStart.getUTCDate() + 7);
   const nextEnd = new Date(`${model.syncCalls[0].endDate}T12:00:00Z`);
@@ -203,7 +214,7 @@ test('week selection synchronizes the chosen range and adding another subject ke
   await expect.poll(() => model.syncCalls.at(-1)).toEqual({ startDate: nextStart.toISOString().slice(0, 10), endDate: nextEnd.toISOString().slice(0, 10) });
   await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(3);
   await page.locator('[data-action="recipients"]').first().click();
-  await expect(page.locator('[data-student-id="other"]')).toHaveCount(0);
+  await expect(page.locator('[data-student-id="other"]')).toBeChecked();
   await expect(page.locator('[data-student-id="ana"]')).toBeChecked();
 });
 
@@ -215,7 +226,7 @@ test('disconnect clears the saved connection while keeping the synchronized loca
   await page.locator('[data-action="canvas-disconnect"]').click();
   await expect.poll(() => model.disconnectCalls).toBe(1);
   await expect(page.locator('#canvas-connection-bar')).toContainText('Conectar Canvas');
-  await expect(page.locator('#course-select')).toHaveValue(courseId);
+  await expect(page.locator('#academic-course-select option:checked')).toContainText('3º de Grado en Economía');
   await expect(page.locator('#email-body')).toHaveText(body);
   await expect.poll(async () => (await readState(request)).courses.length).toBe(1);
   await nav(page, 'courses').click();
@@ -230,7 +241,7 @@ test('single-class refresh follows rescheduled calendar dates while preserving a
   const day = page.locator('[data-field="day"]');
   const time = page.locator('[data-field="time"]');
   const calendarDate = new Date(`${model.syncCalls[0].startDate}T16:00:00.000Z`);
-  const localDay = date => new Intl.DateTimeFormat('en', { timeZone: 'Europe/Vienna', day: 'numeric' }).format(date);
+  const localDay = date => new Intl.DateTimeFormat('en', { timeZone: 'Europe/Vienna', day: '2-digit' }).format(date);
   const localTime = date => new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Vienna', hour: '2-digit', minute: '2-digit' }).format(date);
   await expect(day).toHaveValue(localDay(calendarDate));
   await expect(time).toHaveValue(localTime(calendarDate));
@@ -256,4 +267,63 @@ test('single-class refresh follows rescheduled calendar dates while preserving a
   await expect(time).toHaveValue(localTime(calendarDate));
   await expect.poll(async () => (await readState(request)).composer.fields.day).toBe(editedDay);
   await expect.poll(async () => (await readState(request)).composer.fields.time).toBe(localTime(calendarDate));
+});
+
+test('a single draft blocks Gmail when its calendar event disappears while its module remains', async ({ page, request }) => {
+  const model = await mockCanvas(page);
+  await connectCanvas(page);
+  await page.locator('[data-action="compose-mode"][data-mode="single"]').click();
+  await expect(page.locator('#session-select')).toHaveValue('event:class-2');
+  await expect(page.locator('[data-action="gmail"]')).toBeEnabled();
+  await page.locator('[data-action="save-draft"]').click();
+  await expect(page.locator('#toast')).toContainText('Borrador guardado');
+  const oldFields = (await readState(request)).composer.fields;
+  const oldBody = await page.locator('#email-body').textContent();
+
+  model.includeClass = false;
+  await page.locator('[data-action="canvas-sync"]').click();
+  await expect.poll(() => model.syncCalls.length).toBe(2);
+  await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
+  await expect(page.locator('#preview-validation')).toContainText('La actividad seleccionada ya no aparece en el calendario');
+  await expect(page.locator('[data-action="gmail"]')).toBeDisabled();
+  await expect(page.locator('#session-select option:checked')).toHaveText('Actividad fuera del calendario actual');
+  await expect(page.locator('#session-select option:checked')).toHaveJSProperty('disabled', true);
+  await expect(page.locator('#session-select option[value="live-2"]')).toHaveCount(1);
+  await expect(page.locator('#email-body')).toHaveText(oldBody);
+  await expect.poll(async () => (await readState(request)).composer.fields).toEqual(oldFields);
+
+  await page.locator('#session-select').selectOption({ label: 'Introducir los datos manualmente' });
+  await expect(page.locator('#preview-validation')).not.toContainText('La actividad seleccionada ya no aparece en el calendario');
+  await expect.poll(async () => (await readState(request)).composer.calendarEventId).toBe('');
+});
+
+test('a saved draft requires reviewing its academic course after Canvas moves its subject to another year', async ({ page, request }) => {
+  const model = await mockCanvas(page);
+  await connectCanvas(page);
+  await expect(page.locator('[data-action="gmail"]')).toBeEnabled();
+  await page.locator('[data-action="save-draft"]').click();
+  await expect(page.locator('#toast')).toContainText('Borrador guardado');
+  const saved = (await readState(request)).drafts[0];
+
+  model.semester = 'S7';
+  await page.locator('[data-action="canvas-sync"]').click();
+  await expect.poll(() => model.syncCalls.length).toBe(2);
+  await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
+  await expect(page.locator('#preview-validation')).toContainText('El curso académico de este borrador ya no coincide con los datos de Canvas');
+  await expect(page.locator('[data-action="gmail"]')).toBeDisabled();
+  await expect(page.locator('#recipient-count')).toHaveText('0 de 0 estudiantes');
+  await expect(page.locator('#academic-course-select option:checked')).toHaveText('Revisar curso del borrador');
+  await expect(page.locator('#academic-course-select option:checked')).toHaveJSProperty('disabled', true);
+  await expect(page.locator('[data-field="course_name"]')).toHaveValue('3º de Grado en Economía');
+  await page.locator('[data-action="recipients"]').first().click();
+  await expect(page.locator('[data-student-id]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Listo', exact: true }).click();
+  expect((await readState(request)).drafts[0]).toEqual(saved);
+
+  const fourth = page.locator('#academic-course-select option').filter({ hasText: '4º de Grado en Economía' });
+  await page.locator('#academic-course-select').selectOption(await fourth.getAttribute('value'));
+  await expect(page.locator('[data-field="course_name"]')).toHaveValue('4º de Grado en Economía');
+  await expect(page.locator('#preview-validation')).not.toContainText('El curso académico de este borrador ya no coincide');
+  await expect(page.locator('#recipient-count')).toHaveText('2 de 3 estudiantes');
+  await expect(page.locator('[data-action="gmail"]')).toBeEnabled();
 });

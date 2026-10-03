@@ -1,4 +1,4 @@
-import { deriveSessions, isValidEmail } from './domain.js';
+import { deriveSessions } from './domain.js';
 import { createWeeklyEntry } from './weekly.js';
 
 const fold = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -33,12 +33,15 @@ export function canvasPlainText(html = '') {
     .replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 const sessionDay = session => session.year && session.month && session.day ? `${session.year}-${pad(session.month)}-${pad(session.day)}` : '';
-const classNumber = title => /\b(?:clase|sesion)(?:\s+sincronic[ao])?\s*(\d+)\b/.exec(fold(title))?.[1];
+const classNumber = title => {
+  const value = /\b(?:clase|sesion|class|session|lecture)(?:\s+(?:sincronic[ao]|sincron[ao]|en directo|en vivo|synchronous|live))?\s*(?:n[º°.]?\s*)?(\d+)\b/.exec(fold(title))?.[1];
+  return value == null ? '' : String(Number(value));
+};
 const exam = title => /\b(?:examen|parcial|exam|quiz|evaluacion)\b/.test(fold(title));
 const tutorial = title => /\b(?:tutoria|tutoring)\b/.test(fold(title));
 const notAClass = event => event.type === 'assignment' || exam(event.title) || tutorial(event.title) ||
-  /\b(?:entrega|tarea|plazo|vencimiento|cancelad[ao]s?|suspendid[ao]s?|reunion|meeting|deadline|assignment|recording|grabacion|foro|discussion)\b|\b(?:fecha limite|office hours)\b/.test(fold(event.title));
-const classEvent = title => /(?:^|[:|–—-])\s*(?:(?:proxima|next)\s+)?(?:clase|sesion|class|session|lecture)\b|\b(?:clase|sesion)\s+(?:sincronic[ao]|sincron[ao]|en directo)\b|\b(?:live class|live session|synchronous class|synchronous session)\b/.test(fold(title));
+  /\b(?:entrega|tarea|plazo|vencimiento|cancelad[ao]s?|suspendid[ao]s?|reunion|meeting|deadline|assignment|recording|grabacion|foro|discussion|asincron[ao]s?|asincronic[ao]s?|asynchronous)\b|\b(?:fecha limite|office hours)\b/.test(fold(event.title));
+const classEvent = title => /(?:^|[:|–—-])[\s⚪🟢🔴📚\uFE0F]*(?:(?:proxima|next)\s+)?(?:clase|sesion|class|session|lecture)\b|\b(?:clase|sesion)\s+(?:sincronic[ao]|sincron[ao]|en directo)\b|\b(?:live class|live session|synchronous class|synchronous session)\b/u.test(fold(title));
 function eventDay(event, timeZone) {
   if (event.allDay && /^\d{4}-\d{2}-\d{2}$/.test(event.day || '') && dayInZone(`${event.day}T12:00:00Z`, 'UTC') === event.day) return event.day;
   return dayInZone(event.startAt, timeZone);
@@ -49,48 +52,65 @@ function localSortTime(timestamp, timeZone) {
   return `${dayInZone(timestamp, timeZone)}T${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
+const spanishDate = date => new Intl.DateTimeFormat('es-ES', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${date}T12:00:00Z`));
+const timeInZone = (timestamp, timeZone) => new Intl.DateTimeFormat('es-ES', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(timestamp));
+
+/** Calendar instants are authoritative; module titles never supply a missing calendar hour. */
+function calendarSchedule(event, timeZone, scheduleSource = 'calendar') {
+  const date = eventDay(event, timeZone);
+  const [year, month, day] = date.split('-');
+  const allDay = event.allDay === true;
+  const hasEnd = !allDay && Number.isFinite(Date.parse(event.endAt)) && Date.parse(event.endAt) > Date.parse(event.startAt);
+  const startTime = allDay ? '' : timeInZone(event.startAt, timeZone);
+  const endTime = hasEnd ? timeInZone(event.endAt, timeZone) : '';
+  const endDate = hasEnd ? dayInZone(event.endAt, timeZone) : '';
+  const ending = endTime ? endDate === date ? `–${endTime}` : ` – ${spanishDate(endDate)} · ${endTime}` : '';
+  return { date, day, month, year, startTime, endTime, endDate, allDay, timeZone, scheduleSource,
+    scheduleLabel: `${spanishDate(date)} · ${allDay ? 'Todo el día' : `${startTime}${ending} (${timeZone})`}` };
+}
+
+function moduleSchedule(session, timeZone) {
+  const date = sessionDay(session);
+  return { date, day: pad(session.day), month: pad(session.month), year: String(session.year),
+    startTime: session.time || '', endTime: '', endDate: '', allDay: false, timeZone, scheduleSource: 'module',
+    scheduleLabel: `Fecha en el módulo de Canvas: ${spanishDate(date)}${session.time ? ` · ${session.time} (${timeZone})` : ' · Hora no publicada'}` };
+}
+
 /** Match a calendar event only when Canvas gives unambiguous evidence. */
 function matchSession(event, sessions, timeZone) {
-  if (notAClass(event)) return null;
   const exact = sessions.filter(session => fold(session.title) === fold(event.title));
+  if (notAClass(event)) {
+    // A tutorial can be the university's name for a live module, but only an exact
+    // synchronous-module identity proves it; "Tutoría 2" never implies "Clase 2".
+    const withoutTutorialLabel = { ...event, title: String(event.title || '').replace(/\btutor[ií]a|tutoring/gi, '') };
+    return tutorial(event.title) && !notAClass(withoutTutorialLabel) && exact.length === 1 ? exact[0] : null;
+  }
   if (exact.length === 1) return exact[0];
   if (!classEvent(event.title)) return null;
   const number = classNumber(event.title);
   const numbered = number ? sessions.filter(session => classNumber(session.title) === number) : [];
   if (numbered.length === 1) return numbered[0];
+  // An explicit class number is stronger evidence than a coinciding date.
+  if (number && !numbered.length) return null;
   // A deadline or an unrelated meeting on a class day does not identify that class.
   const date = eventDay(event, timeZone);
-  const dated = sessions.filter(session => sessionDay(session) === date);
+  const dated = (number ? numbered : sessions).filter(session => sessionDay(session) === date);
   if (dated.length === 1) return dated[0];
   return null;
-}
-
-/** Exact shared rosters suggest a cohort; recipients still come from the selected course. */
-export function relatedCanvasCourses(courses, selected) {
-  if (!selected) return [];
-  const signature = course => {
-    if (course.source?.type !== 'canvas' || course.rosterComplete !== true || course.rosterAuthoritative !== true || course.syncStatus?.students !== 'ok') return '';
-    const students = course.students || [];
-    if (students.some(student => !student.id || !isValidEmail(student.email))) return '';
-    const ids = [...new Set(students.map(student => String(student.id)))].sort();
-    return ids.length >= 2 ? JSON.stringify(ids) : '';
-  };
-  const own = signature(selected);
-  return courses.filter(course => course.id === selected.id || (own && course.source?.type === 'canvas' &&
-    course.source?.baseUrl === selected.source?.baseUrl && course.source?.userId === selected.source?.userId && signature(course) === own)).map(course => course.id);
 }
 
 export function planCanvasWeek(courses, { startDate, endDate, timeZone = 'Europe/Vienna' }) {
   validateWeekRange(startDate, endDate);
   const entries = [], warnings = [];
   const inRange = day => day && day >= startDate && day <= endDate;
-  const when = timestamp => new Intl.DateTimeFormat('es-ES', { timeZone, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(new Date(timestamp));
-  const allDayWhen = event => `${new Intl.DateTimeFormat('es-ES', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(`${eventDay(event, timeZone)}T12:00:00Z`))} · Todo el día`;
   for (const course of courses) {
     const sessions = deriveSessions(course), usedSessions = new Set();
     const assignments = course.assignments || [];
     const assignmentIds = new Set(assignments.map(item => String(item.id)));
     const events = course.calendarEvents || [];
+    // A class moved outside this week must not reappear on an obsolete module date.
+    const eventSessions = new Map(events.map(event => [event, matchSession(event, sessions, timeZone)]));
+    for (const session of eventSessions.values()) if (session) usedSessions.add(session.id);
     const seenEvents = new Set();
     const stalePreparation = course.preparationComplete === false || course.syncStatus?.modules === 'error' || course.syncStatus?.pages === 'error';
     const labels = { modules: 'los módulos', pages: 'el contenido de las sesiones', students: 'la lista de estudiantes', calendar: 'el calendario', assignments: 'las actividades y entregas', teachers: 'el profesorado' };
@@ -108,6 +128,7 @@ export function planCanvasWeek(courses, { startDate, endDate, timeZone = 'Europe
       item.id = `canvas-event:${course.id}:${event.id}`;
       item.sourceEventId = String(event.id);
       item.generated = true;
+      Object.assign(item, fallback ? moduleSchedule(session, timeZone) : calendarSchedule(event, timeZone));
       item.event = event.title || session?.title || 'Actividad de Canvas';
       item.teacher = (course.teachers || []).length === 1 ? (typeof course.teachers[0] === 'string' ? course.teachers[0] : course.teachers[0].name || '') : '';
       if (!session) {
@@ -119,7 +140,7 @@ export function planCanvasWeek(courses, { startDate, endDate, timeZone = 'Europe
       }
       if (session && stalePreparation) item.evidence = `Preparación pendiente de actualizar; puede proceder de la última copia local. ${item.evidence}`;
       if (!fallback && course.syncStatus?.calendar === 'error') item.evidence = `Calendario de la última copia local, pendiente de actualizar. ${item.evidence}`;
-      item.notes = [fallback ? `Fecha en Canvas: ${session.day}/${session.month}/${session.year}${session.time ? ` · ${session.time}` : ''}` : event.allDay ? allDayWhen(event) : `${when(event.startAt)} (${timeZone})`, session && description ? description : '', /^https:\/\//.test(event.url || '') ? event.url : ''].filter(Boolean).join('\n\n');
+      item.notes = [session && description ? description : '', /^https:\/\//.test(event.url || '') ? event.url : ''].filter(Boolean).join('\n\n');
       item.sortAt = fallback ? `${sessionDay(session)}T${session.time || '12:00'}:00` : event.allDay ? `${eventDay(event, timeZone)}T00:00:00` : localSortTime(event.startAt, timeZone);
       entries.push(item);
       if (session) usedSessions.add(session.id);
@@ -129,19 +150,24 @@ export function planCanvasWeek(courses, { startDate, endDate, timeZone = 'Europe
       const assignmentId = String(event.assignmentId || event.id).replace(/^assignment[_-]/, '');
       if (event.type === 'assignment' && assignmentIds.has(assignmentId)) continue;
       seenEvents.add(String(event.id));
-      append(event, matchSession(event, sessions, timeZone));
+      append(event, eventSessions.get(event));
     }
     for (const session of sessions) {
-      if (!usedSessions.has(session.id) && inRange(sessionDay(session))) append({ id: `module-${session.id}`, title: session.title }, session, true);
+      if (usedSessions.has(session.id) || !inRange(sessionDay(session))) continue;
+      // A fresh Canvas timetable can omit a moved/cancelled class even if its module retains an old date.
+      if (course.source?.type === 'canvas' && course.syncStatus?.calendar === 'ok') continue;
+      append({ id: `module-${session.id}`, title: session.title }, session, true);
     }
     for (const assignment of assignments) {
       if (!assignment.dueAt || !inRange(dayInZone(assignment.dueAt, timeZone))) continue;
       const description = canvasPlainText(assignment.description);
       const deadlineLabel = assignment.differentiated ? `Fecha publicada para ${assignment.dueScope || 'los destinatarios indicados en Canvas'}` : 'Fecha límite';
+      const schedule = calendarSchedule({ startAt: assignment.dueAt }, timeZone, 'assignment');
+      schedule.scheduleLabel = `${deadlineLabel}: ${schedule.scheduleLabel}`;
       if (assignment.differentiated) warnings.push(`${course.subject || course.name}: «${assignment.title}» tiene fechas o destinatarios específicos; cada estudiante debe comprobar en Canvas la fecha que le corresponde.`);
-      entries.push({ ...createWeeklyEntry(course), id: `canvas-assignment:${course.id}:${assignment.id}`, sourceEventId: `assignment-${assignment.id}`, generated: true,
+      entries.push({ ...createWeeklyEntry(course), ...schedule, id: `canvas-assignment:${course.id}:${assignment.id}`, sourceEventId: `assignment-${assignment.id}`, generated: true,
         event: `Entrega: ${assignment.title}`, preparationMode: 'manual', preparation: description || 'Completar y entregar la actividad en Canvas.',
-        notes: `${deadlineLabel}: ${when(assignment.dueAt)} (${timeZone})${assignment.differentiated ? '\nComprueba en Canvas la fecha que te corresponde.' : ''}${/^https:\/\//.test(assignment.url || '') ? `\n${assignment.url}` : ''}`, evidence: course.syncStatus?.assignments === 'error' ? 'Fecha de entrega e instrucciones de la última copia local; pendientes de actualizar en Canvas.' : 'Fecha de entrega e instrucciones de la actividad en Canvas.', sortAt: localSortTime(assignment.dueAt, timeZone) });
+        notes: [assignment.differentiated ? 'Comprueba en Canvas la fecha que te corresponde.' : '', /^https:\/\//.test(assignment.url || '') ? assignment.url : ''].filter(Boolean).join('\n'), evidence: course.syncStatus?.assignments === 'error' ? 'Fecha de entrega e instrucciones de la última copia local; pendientes de actualizar en Canvas.' : 'Fecha de entrega e instrucciones de la actividad en Canvas.', sortAt: localSortTime(assignment.dueAt, timeZone) });
     }
   }
   entries.sort((a, b) => String(a.sortAt).localeCompare(String(b.sortAt)) || a.id.localeCompare(b.id));

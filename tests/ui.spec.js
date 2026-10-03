@@ -34,7 +34,7 @@ async function importCourseJson(page, course) {
     name: 'curso.json', mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify(course)),
   });
-  await expect(page.locator('#toast')).toHaveText('1 cursos importados.');
+  await expect(page.locator('#toast')).toHaveText('1 asignatura importada.');
   await nav(page, 'compose').click();
 }
 
@@ -63,7 +63,7 @@ test('starts empty and adds clearly identified local examples only when requeste
 
   await page.getByRole('button', { name: /Explorar con cursos de ejemplo/ }).click();
   await expect(page.locator('#course-select option')).toHaveCount(3);
-  await expect(page.locator('#course-select option')).toContainText(['DEMO', 'DEMO', 'DEMO']);
+  await expect(page.locator('#course-select option')).toContainText(['Ejemplo', 'Ejemplo', 'Ejemplo']);
   await expect(page.locator('#recipient-count')).toHaveText('8 de 8 estudiantes');
   await expect(page.getByRole('button', { name: 'Abrir borrador en Gmail' })).toBeDisabled();
   await expect(page.locator('#preview-validation')).toContainText('Añade tu dirección de correo');
@@ -87,8 +87,8 @@ test('date parts are independent and choosing the next class updates the Canvas 
   await expect(field(page, 'month')).toHaveValue('10');
   await expect(field(page, 'year')).toHaveValue('2026');
   await expect(field(page, 'preparation')).toHaveValue(/Sesión 4.*4\.3 Vídeo: Cómo argumentar un dilema/);
-  await page.getByRole('button', { name: 'Ver estructura del curso', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'La estructura de tu curso' });
+  await page.getByRole('button', { name: 'Ver estructura de la asignatura', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'La estructura de tu asignatura' });
   await expect(dialog.locator('.module-item')).toHaveCount(6);
   await expect(dialog.locator('.module-item.live')).toHaveCount(2);
   await expect(dialog).toContainText('Sesión 4 | Dilemas contemporáneos');

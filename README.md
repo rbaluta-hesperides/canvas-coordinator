@@ -1,6 +1,6 @@
 # Campus Coordinator
 
-Una aplicación local que conecta con Canvas y prepara correos de coordinación académica a partir de sus cursos, estudiantes, clases y entregas. Las plantillas y los borradores se guardan en tu ordenador.
+Una aplicación local que conecta con Canvas y prepara correos de coordinación académica por curso universitario, con sus asignaturas, estudiantes, clases y entregas. Las plantillas y los borradores se guardan en tu ordenador.
 
 ## Ejecutar
 
@@ -32,15 +32,25 @@ npm.cmd run test:electron
 ## Flujo de trabajo
 
 1. Pulsa **Conectar Canvas**, comprueba el dominio de tu universidad e inicia sesión en la ventana que se abre. Se usa tu cuenta de coordinación y el acceso institucional habitual.
-2. La aplicación descarga automáticamente tus cursos, módulos, estudiantes activos, profesorado, calendario y actividades con fecha de entrega. No necesitas exportar una caché ni preparar un CSV.
-3. Elige el curso destinatario y **Resumen semanal**, o una plantilla para una clase individual. Revisa las actividades, fechas y preparación obtenidas de Canvas.
+2. La aplicación descarga automáticamente tus asignaturas, módulos, estudiantes activos, profesorado, calendario y actividades con fecha de entrega. Agrupa las asignaturas por titulación y curso cuando Canvas proporciona esos datos. No necesitas exportar una caché ni preparar un CSV.
+3. Elige el curso destinatario, por ejemplo **3º de Grado en Economía**, y **Resumen semanal**, o una plantilla para una clase individual. Sus asignaturas se seleccionan dentro del curso. Revisa las actividades, fechas y preparación obtenidas de Canvas.
 4. Ajusta el texto si hace falta. El día, el mes y el año siguen disponibles por separado para colocarlos de forma independiente en tus plantillas.
 5. Selecciona todos los estudiantes con correo disponible o únicamente las personas que deban recibir el mensaje. Revisa tu dirección y firma en los ajustes.
 6. Abre Gmail para revisar el correo. La dirección de coordinación figura en «Para» y los estudiantes seleccionados en «CCO». Tú realizas el envío desde Gmail.
 
 Las plantillas emplean variables como `{{course_name}}`, `{{subject}}`, `{{day}}`, `{{month}}`, `{{year}}`, `{{session_name}}` y `{{preparation}}`. Puedes colocar cada parte de la fecha de forma independiente. Las variables pendientes impiden abrir un mensaje incompleto.
 
+`{{course_name}}` es el curso universitario destinatario, como «3º de Grado en Economía»; `{{subject}}` es una asignatura concreta, como «Econometría I».
+
 En **Ajustes → Apariencia** puedes elegir **Claro**, **Oscuro** o **Sistema**. El botón de luna o sol de la barra superior permite cambiar rápidamente de modo. La preferencia se guarda en este equipo y se recupera al volver a abrir la aplicación.
+
+## Cursos y asignaturas
+
+La jerarquía es **curso universitario → asignaturas → actividades del calendario**. El objeto que la API de Canvas llama `course` corresponde aquí a una asignatura; no se utiliza su nombre como si fuera el curso universitario completo.
+
+La agrupación automática reconoce los códigos académicos que utiliza CanvasManager: por ejemplo, `Econometría I [G.EC|26/27|S5|2]` identifica una asignatura de Economía, del periodo académico **2026/27**, y del semestre **5**, que corresponde a **tercero**. Los semestres 5 y 6 pertenecen a tercero. El periodo académico y el año de la titulación son datos distintos. Una asignatura marcada `S3-S5` se incluye tanto en segundo como en tercero, sin mezclar sus destinatarios. La agrupación mantiene separadas las cuentas de Canvas y los periodos académicos.
+
+La coincidencia de estudiantes entre asignaturas no se utiliza para deducir el curso. Cuando faltan los metadatos, las asignaturas siguen disponibles sin un curso identificado; no se inventa una titulación ni un año. Los códigos de titulaciones cuyo nombre no se reconoce se conservan tal como aparecen en Canvas.
 
 ## Conexión con Canvas
 
@@ -52,13 +62,15 @@ La aplicación solo puede leer los cursos y datos que permite tu cuenta. La list
 
 ## Resumen semanal
 
-El modo **Resumen semanal** reúne clases, tutorías, exámenes y otros avisos en un solo correo. El asunto usa el intervalo de días y el nombre del curso o grupo: `Semana del 5 al 9 | Nombre del curso`. El modo de preparación de una clase individual sigue disponible.
+El modo **Resumen semanal** reúne clases, tutorías, exámenes y otros avisos de las asignaturas de un curso en un solo correo. El asunto usa el intervalo de días y el nombre del curso: `Semana del 5 al 9 | 3º de Grado en Economía`. El modo de preparación de una clase individual sigue disponible.
 
-1. Selecciona arriba el curso o grupo destinatario y activa **Resumen semanal**. Para los cursos conectados, la aplicación propone la próxima semana; puedes cambiar el periodo y las asignaturas incluidas. Los campos de la fecha del correo se pueden seguir editando por separado.
-2. El calendario y las actividades de Canvas generan los apartados del correo con las fechas, horas, instrucciones publicadas y entregas. Las clases se vinculan con su módulo cuando el título, número o fecha permiten identificarlas sin ambigüedad. La preparación procede de las sesiones y materiales anteriores a esa clase en el orden de Canvas. Revisa los avisos cuando Canvas no publique preparación suficiente; el temario de un examen no se deduce de otras clases.
+1. Selecciona arriba el curso destinatario y activa **Resumen semanal**. Para los cursos conectados, la aplicación propone la próxima semana e incluye sus asignaturas; puedes cambiar el periodo y las asignaturas incluidas. Los campos de la fecha del correo se pueden seguir editando por separado.
+2. El calendario y las actividades de Canvas generan los apartados del correo con las fechas, las horas de inicio y fin, las instrucciones publicadas y las entregas. Las clases se vinculan con su módulo cuando el título, número o fecha permiten identificarlas sin ambigüedad. La preparación procede de las sesiones y materiales anteriores a esa clase en el orden de Canvas. Revisa los avisos cuando Canvas no publique preparación suficiente; el temario de un examen no se deduce de otras clases.
 3. Edita el saludo, la introducción y la despedida, añade avisos generales si hacen falta y revisa la vista previa. Selecciona los estudiantes destinatarios y abre Gmail con coordinación en «Para» y la selección en «CCO».
 
-Puedes añadir actividades manuales cuando necesites comunicar algo que no figure en Canvas. Las fechas con hora se muestran en la zona horaria elegida en los ajustes. La lista de destinatarios procede únicamente del curso o grupo seleccionado arriba: incluir otra asignatura en el resumen no añade sus estudiantes al mensaje.
+Puedes añadir actividades manuales cuando necesites comunicar algo que no figure en Canvas. Las fechas y el intervalo horario proceden del calendario de Canvas y se muestran en la zona horaria elegida en los ajustes. Una actividad de día completo se identifica como tal; si Canvas no publica una hora, no se inventa. Cambiar el módulo de preparación no sustituye el horario de una actividad publicada en el calendario.
+
+Los destinatarios del curso se reúnen a partir de las matrículas de sus asignaturas exclusivas de ese año, sin repetir estudiantes ni direcciones. Las asignaturas compartidas con otros años se incluyen en la agenda, pero sus matrículas no añaden automáticamente estudiantes de otro curso. Si solo existen asignaturas compartidas, la aplicación muestra que no puede identificar los destinatarios de ese curso con esos datos. La lista permite revisar o reducir la selección. Cambiar las asignaturas incluidas en el resumen no amplía la lista de destinatarios del curso seleccionado.
 
 Si una entrega tiene fechas distintas por sección, grupo o estudiante, se indican como fechas específicas publicadas en Canvas. Las excepciones individuales no revelan nombres de estudiantes en el correo. Cuando Canvas no facilita esas fechas completas, se muestra un aviso y no se presenta una fecha general como válida para todo el curso.
 
@@ -86,7 +98,7 @@ estudiante-1,Alba Navarro,alba@example.com
 estudiante-2,Bruno López,bruno@example.com
 ```
 
-También puedes importar cursos en JSON con sus campos `id`, `name`, `code`, `subject`, `students` y `modules`. Los módulos usan `id`, `name`, `position` e `items`; sus elementos usan `id`, `title`, `type` y `position`. Se aceptan tanto estructuras compatibles con Canvas como los sobres de caché de CanvasManager.
+También puedes importar asignaturas en JSON con sus campos `id`, `name`, `code`, `subject`, `students` y `modules`. La pertenencia a un curso se obtiene de los códigos de Canvas o de `academicMemberships`, cuyos elementos incluyen `degreeCode`, `degree`, `academicPeriod` y `studyYear`. Los módulos usan `id`, `name`, `position` e `items`; sus elementos usan `id`, `title`, `type` y `position`. Se aceptan tanto estructuras compatibles con Canvas como los sobres de caché de CanvasManager.
 
 Los cursos de demostración están identificados como tales y todos sus correos usan `example.com`.
 
@@ -96,11 +108,11 @@ La conexión y lectura de contenidos toma como referencia los servicios de Canva
 
 Los módulos y sus elementos se ordenan por `position`. Una «Sesión N» habitual corresponde a material asincrónico; una «Clase sincrónica N» o una «Sesión sincrónica N» identifica la clase en directo. También se reconocen los módulos marcados con `⚪` y «Sesión N», o con elementos «Antes/Después de la clase N». La sugerencia indica la última sesión y el último material previos a la clase elegida, con los contenidos acumulados hasta ese punto. Se excluyen las clases sincrónicas anteriores y los elementos administrativos, de debate o de grabaciones. Los recursos generales fuera de una sesión no cambian el punto de preparación. Cuando no existen módulos identificados como sesiones, solo se propone una preparación si hay evidencia explícita de vídeos; la interfaz indica que esa sugerencia necesita revisión.
 
-Las fechas proceden del calendario de Canvas y también pueden leerse de los títulos de sus módulos, por ejemplo `Después de la clase 2 [27/10/2026]`. Si Canvas no permite identificar una clase o no publica su preparación, se indica para revisión. La aplicación no deduce qué ha visto cada estudiante y presenta la preparación como una sugerencia que debe revisar coordinación.
+Las fechas y horas proceden del calendario de Canvas. Al trabajar con importaciones o una copia cuyo calendario no se ha podido actualizar, también pueden leerse fechas explícitas de los títulos de los módulos, por ejemplo `Después de la clase 2 [27/10/2026]`. Un calendario actualizado tiene prioridad sobre esas fechas, para que una clase reprogramada no vuelva a aparecer con su horario antiguo. Si Canvas no permite identificar una clase o no publica su preparación, se indica para revisión. La aplicación no deduce qué ha visto cada estudiante y presenta la preparación como una sugerencia que debe revisar coordinación.
 
 ## Validación
 
-Las pruebas cubren la conexión a Canvas con respuestas simuladas, la paginación, la protección de credenciales, los permisos parciales, la actualización de estudiantes, las fechas del calendario y la generación del resumen semanal. También cubren la derivación de clases y preparación, la sustitución de variables, la construcción del enlace de Gmail, la recuperación de archivos locales y los flujos de interfaz. Los borradores guardados conservan el texto de su plantilla aunque luego se edite la biblioteca.
+Las pruebas cubren la conexión a Canvas con respuestas simuladas, la paginación, la protección de credenciales, los permisos parciales, la actualización de estudiantes, las fechas y horas del calendario y la generación del resumen semanal. También cubren la distinción entre cursos y asignaturas, las asignaturas compartidas entre años, la separación de periodos y cuentas, la unión de destinatarios, la derivación de clases y preparación, la sustitución de variables, la construcción del enlace de Gmail, la recuperación de archivos locales y los flujos de interfaz. Los borradores guardados conservan el texto de su plantilla aunque luego se edite la biblioteca.
 
 Las pruebas de navegador usan Microsoft Edge en Windows si está instalado; puedes indicar otro Chromium con `PLAYWRIGHT_EXECUTABLE_PATH`. Usan una carpeta de datos independiente y bloquean toda navegación externa. Las pruebas de escritorio usan un perfil temporal y sustituyen la apertura del navegador. No necesitan una cuenta de Canvas o de Gmail y no envían mensajes.
 

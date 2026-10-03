@@ -37,6 +37,16 @@ h3 { font-size: 14px; font-weight: 600; }
 .nav-item.settings-link:hover { background: #eef3eb; border-color: #cddccc; }
 .nav-item.settings-link.active { background: #eaf0e9; border-color: #c4d4c7; color: #285747; }
 .settings-link.active .settings-icon { background: #dbe8dc; }
+.academic-course-list { display: flex; flex-direction: column; gap: 24px; }
+.academic-course-card > header { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.academic-course-card > header h2 { font-family: Georgia, serif; font-size: 27px; font-weight: 400; line-height: 1.35; }
+.academic-course-card > header p { margin-top: 9px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+.academic-course-card > .course-grid { margin-top: 24px; }
+.academic-course-card .course-card-actions { flex-wrap: wrap; gap: 12px; }
+.calendar-schedule { display: flex; align-items: flex-start; gap: 10px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 7px; margin: 0 0 18px; color: var(--green); background: var(--surface); font-size: 12px; line-height: 1.7; }
+.calendar-schedule .icon { width: 17px; height: 17px; margin-top: 3px; }
+.calendar-schedule strong { display: block; font-size: 10px; font-weight: 600; color: var(--muted); margin-bottom: 3px; }
+@media (max-width: 900px) { .academic-course-card > header { align-items: flex-start; flex-direction: column; }.academic-course-card > header h2 { font-size: 23px; } }
 .local-card { margin: 30px 4px 24px; padding: 20px 14px 17px; border: 1px solid #e9ede4; border-radius: 8px; background: #f9faf6; }
 .local-icon { display: block; color: #7a9468; margin-bottom: 10px; }
 .local-card strong { font-size: 11px; }

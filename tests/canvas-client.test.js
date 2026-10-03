@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCanvasClient, normalizeCanvasBase } from '../electron/canvas-client.js';
 import { planCanvasWeek } from '../src/canvas-planner.js';
+import { academicCourses } from '../src/academic.js';
 
 const base = 'https://canvas.example.edu';
 const currentTime = Date.parse('2026-10-03T10:00:00Z');
@@ -92,6 +93,23 @@ test('malformed course rows reject the entire sync instead of silently deleting 
     await assert.rejects(client.sync(), { code: 'INVALID_RESPONSE' });
     assert.ok(calls.every(call => !call.url.pathname.startsWith('/api/v1/courses/42/')));
   }
+});
+
+test('sync preserves academic metadata and cleans subject labels independently of degree-year courses', async () => {
+  const { client } = fixture({ '/api/v1/courses': () => response([{
+    id: '42', name: 'Nombre abreviado', original_name: 'Econometría I [G.EC|26/27|S5|2]',
+    course_code: 'G.EC|26/27|S5|2', term: { name: 'Escuela de Grados - 2026/2027' },
+  }]) });
+  const { courses } = await client.sync();
+  const [subject] = courses;
+  assert.equal(subject.originalName, 'Econometría I [G.EC|26/27|S5|2]');
+  assert.equal(subject.name, subject.originalName);
+  assert.equal(subject.displayName, 'Econometría I');
+  assert.equal(subject.subject, 'Econometría I');
+  assert.equal(subject.courseCode, 'G.EC|26/27|S5|2');
+  assert.equal(subject.termName, 'Escuela de Grados - 2026/2027');
+  assert.equal(subject.academicMemberships[0].studyYear, 3);
+  assert.equal(academicCourses(courses)[0].name, '3º de Grado en Economía');
 });
 
 test('differentiated assignments keep scoped deadlines and exclude individual student identities', async () => {
@@ -312,8 +330,8 @@ test('calendar fetches adjacent days and the planner keeps exactly the chosen lo
   assert.deepEqual(result.courses[0].calendarRange, { startDate: '2026-10-05', endDate: '2026-10-09' });
   const plan = planCanvasWeek(result.courses, { startDate: result.startDate, endDate: result.endDate, timeZone: 'Europe/Vienna' });
   assert.deepEqual(plan.entries.map(entry => entry.sourceEventId), ['first', 'last']);
-  assert.match(plan.entries[0].notes, /00:30/);
-  assert.match(plan.entries[1].notes, /23:30/);
+  assert.match(plan.entries[0].scheduleLabel, /00:30/);
+  assert.match(plan.entries[1].scheduleLabel, /23:30/);
 });
 
 test('generic module video discovery reads latest revisions without marking pages viewed', async () => {

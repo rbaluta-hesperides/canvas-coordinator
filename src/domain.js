@@ -83,6 +83,11 @@ export function normalizeCourses(input) {
       ...(raw.savedAt != null ? { savedAt: raw.savedAt } : {}),
       ...(raw.color ? { color: string(raw.color) } : {}),
       ...(typeof raw.isDemo === 'boolean' ? { isDemo: raw.isDemo } : {}),
+      ...(object(raw.academic) ? { academic: { ...raw.academic } } : {}),
+      ...(Array.isArray(raw.academicMemberships) ? { academicMemberships: raw.academicMemberships.map(value => ({ ...value })) } : {}),
+      ...(raw.originalName ? { originalName: string(raw.originalName) } : {}),
+      ...(raw.courseCode ? { courseCode: string(raw.courseCode) } : {}),
+      ...(raw.termName ? { termName: string(raw.termName) } : {}),
     };
     course.sessions = deriveSessions(course);
     return course;

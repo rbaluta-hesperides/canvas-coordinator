@@ -1,4 +1,5 @@
 import { normalizeCourses, isValidEmail } from '../src/domain.js';
+import { subjectName, subjectAcademicMemberships } from '../src/academic.js';
 
 const DEFAULT_BASE = 'https://hesperides.instructure.com';
 const DAY = 24 * 60 * 60 * 1000;
@@ -239,7 +240,7 @@ export function createCanvasClient({ baseUrl, fetchImpl, getHeaders = () => ({})
       const user = await getProfile({ signal: syncSignal });
       const rawCourses = await paginate('/api/v1/courses', { include: ['term', 'enrollments'] }, syncSignal);
       if (rawCourses.some(course => !validRow(course))) {
-        throw new CanvasError('Canvas devolvió una lista de cursos incompleta o inválida. Se conserva la última copia local.', { code: 'INVALID_RESPONSE' });
+        throw new CanvasError('Canvas devolvió una lista de asignaturas incompleta o inválida. Se conserva la última copia local.', { code: 'INVALID_RESPONSE' });
       }
       const seenCourses = new Set();
       const available = rawCourses.filter(course => {
@@ -267,7 +268,7 @@ export function createCanvasClient({ baseUrl, fetchImpl, getHeaders = () => ({})
           } catch (error) {
             if (fatal(error)) throw error;
             syncStatus[key] = 'error';
-            syncWarnings.push(`${text(raw.name || raw.course_code) || 'Curso'}: no se pudo obtener ${labels[key]}. ${error.message}`);
+            syncWarnings.push(`${text(raw.name || raw.course_code) || 'Asignatura'}: no se pudo obtener ${labels[key]}. ${error.message}`);
             return fallback;
           }
         }
@@ -330,7 +331,7 @@ export function createCanvasClient({ baseUrl, fetchImpl, getHeaders = () => ({})
           return values;
         });
         const assignments = assignmentsRaw.filter(assignment => assignment.published !== false).flatMap(assignment =>
-          assignmentDates(assignment, base, warning => syncWarnings.push(`${text(raw.name || raw.course_code) || 'Curso'}: ${warning}`)));
+          assignmentDates(assignment, base, warning => syncWarnings.push(`${text(raw.name || raw.course_code) || 'Asignatura'}: ${warning}`)));
         const calendarEvents = calendarRaw.filter(event => {
           if (!event || event.id == null || event.hidden === true || event.workflow_state === 'deleted' || !iso(event.start_at)) return false;
           const contexts = [event.effective_context_code, event.context_code, event.all_context_codes].filter(Boolean).flatMap(value => text(value).split(',').map(text));
@@ -351,7 +352,11 @@ export function createCanvasClient({ baseUrl, fetchImpl, getHeaders = () => ({})
         const missingEmailCount = syncStatus.students === 'ok' ? course.students.filter(student => !isValidEmail(student.email)).length : null;
         if (missingEmailCount) syncWarnings.push(`${course.name}: Canvas no permite leer un correo válido de ${missingEmailCount} estudiante(s). No se incluirán automáticamente como destinatarios.`);
         warnings.push(...syncWarnings);
-        return { ...course, teachers, calendarEvents, assignments, syncStatus, syncWarnings, missingEmailCount,
+        const originalName = text(raw.original_name || raw.name || raw.course_code);
+        const academicSource = { originalName, name: originalName, courseCode: text(raw.course_code), termName: text(raw.term?.name) };
+        return { ...course, originalName, displayName: subjectName(academicSource), subject: subjectName(academicSource),
+          courseCode: academicSource.courseCode, termName: academicSource.termName,
+          academicMemberships: subjectAcademicMemberships(academicSource), teachers, calendarEvents, assignments, syncStatus, syncWarnings, missingEmailCount,
           rosterAuthoritative: syncStatus.students === 'ok', rosterComplete: syncStatus.students === 'ok' && missingEmailCount === 0,
           preparationComplete: syncStatus.modules === 'ok' && syncStatus.pages === 'ok', calendarRange: { ...range }, timeZone: text(raw.time_zone), term: text(raw.term?.name) };
       }
@@ -361,7 +366,7 @@ export function createCanvasClient({ baseUrl, fetchImpl, getHeaders = () => ({})
           try {
             courses[index] = await syncCourse(available[index]);
             completed++;
-            progress({ phase: 'course-complete', completed, total: available.length, courseId: courses[index].id, courseName: courses[index].name, message: `${completed} de ${available.length} cursos sincronizados` });
+            progress({ phase: 'course-complete', completed, total: available.length, courseId: courses[index].id, courseName: courses[index].name, message: `${completed} de ${available.length} asignaturas sincronizadas` });
           } catch (error) { failure ||= error; controller.abort(); }
         }
       });

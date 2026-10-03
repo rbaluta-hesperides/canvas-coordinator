@@ -1,8 +1,9 @@
 import { normalizeCourses, deriveSessions, parseStudentCsv, resolveTemplate, buildGmailUrl, isValidEmail } from './domain.js';
 import { createInitialState, createDemoCourses, weeklyTemplate, upgradeWorkspace, VARIABLES } from './seed.js';
 import { createWeeklyEntry, composeWeeklyAgenda, NO_ADDITIONAL_PREPARATION } from './weekly.js';
-import { nextCanvasWeek, planCanvasWeek, relatedCanvasCourses, dayInZone, validateWeekRange } from './canvas-planner.js';
-import { mergeCanvasCourse, reconcileCanvasRecipients } from './canvas-workspace.js';
+import { nextCanvasWeek, planCanvasWeek, dayInZone, validateWeekRange } from './canvas-planner.js';
+import { mergeCanvasCourse, reconcileCanvasRecipients, refreshEditedCalendarSchedule } from './canvas-workspace.js';
+import { academicCourses, academicCourseStudents, subjectsForAcademicCourse, subjectName } from './academic.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -69,8 +70,39 @@ const timeZone = () => state.settings.timeZone || 'Europe/Vienna';
 const liveCourse = value => value?.source?.type === 'canvas';
 const course = () => state.courses.find(c => c.id === state.composer?.courseId);
 const template = () => state.templates.find(t => t.id === state.composer?.templateId) || state.templates[0];
-const selectedStudents = () => (course()?.students || []).filter(s => state.composer.selectedStudentIds.includes(s.id));
 const isWeekly = () => (state.composer?.kind || template()?.kind) === 'weekly';
+// Stored `courses` and `courseId` are Canvas subject IDs for compatibility with saved workspaces.
+let academicGroupSnapshot = null;
+const academicGroups = () => academicGroupSnapshot || academicCourses(state.courses);
+const academicCourse = () => academicGroups().find(group => group.id === state.composer?.academicCourseId);
+const groupForSubject = (subject, preferred) => { const groups = academicGroups(); return groups.find(group => group.id === preferred && group.subjectIds.includes(subject?.id)) || groups.find(group => group.subjectIds.includes(subject?.id)); };
+const groupSubjects = () => { const group = academicCourse(); const assigned = new Set(academicGroups().flatMap(group => group.subjectIds)); return group ? subjectsForAcademicCourse(state.courses, group) : state.courses.filter(subject => !assigned.has(subject.id)); };
+const recipientRoster = () => state.composer?.academicSelectionError ? [] : isWeekly() && academicCourse() ? academicCourseStudents(state.courses, academicCourse()) : course()?.students || [];
+const selectedStudents = () => recipientRoster().filter(s => state.composer.selectedStudentIds.includes(s.id));
+const academicName = (subject = course()) => groupForSubject(subject, state.composer?.academicCourseId)?.name || (!liveCourse(subject) ? subject?.name || '' : '');
+const calendarEntries = subject => {
+  if (!subject) return [];
+  const period = subject.calendarRange || state.canvasLastSync || nextCanvasWeek(new Date(), timeZone());
+  try { return planCanvasWeek([subject], { startDate: period.startDate, endDate: period.endDate, timeZone: timeZone() }).entries; }
+  catch { return []; }
+};
+const calendarSelectionError = () => !isWeekly() && state.composer.calendarEventId && !calendarEntries(course()).some(entry => entry.sourceEventId === state.composer.calendarEventId)
+  ? 'La actividad seleccionada ya no aparece en el calendario. Elige otra actividad antes de abrir Gmail.' : '';
+function ensureAcademicSelection() {
+  const comp = state.composer;
+  if (comp.draftId && comp.academicCourseId && !academicGroups().some(group => group.id === comp.academicCourseId && group.subjectIds.includes(course()?.id))) {
+    comp.academicSelectionError = 'El curso académico de este borrador ya no coincide con los datos de Canvas. Elige el curso correcto antes de abrir Gmail.';
+    return;
+  }
+  comp.academicSelectionError = '';
+  const group = groupForSubject(course(), comp.academicCourseId);
+  const nextId = group?.id || '';
+  if (comp.academicCourseId === nextId) return;
+  comp.academicCourseId = nextId;
+  if (!comp.draftId && group && (!comp.fields.course_name || comp.fields.course_name === course()?.name || comp.fields.course_name === comp.canvasValues?.course_name)) comp.fields.course_name = group.name;
+  if (comp.weeklyPlan && group && !comp.draftId) { comp.weeklyPlan.courseIds = [...group.subjectIds]; comp.weeklyPlan.subjectSelection = 'all'; applyCanvasPlan(); }
+  if (comp.recipientMode === 'all') comp.selectedStudentIds = recipientRoster().filter(s => isValidEmail(s.email)).map(s => s.id);
+}
 
 function updateThemeControls() {
   const dark = document.documentElement.dataset.theme === 'dark';
@@ -105,9 +137,10 @@ function ensureWeeklyFields() {
   for (const [key, value] of Object.entries(defaults)) if (state.composer.fields[key] === undefined) state.composer.fields[key] = value;
   if (!Array.isArray(state.composer.weeklyEntries)) state.composer.weeklyEntries = [createWeeklyEntry()];
   if (liveCourse(course()) && !state.composer.weeklyPlan) {
-    state.composer.weeklyPlan = { ...nextCanvasWeek(new Date(), timeZone()), courseIds: relatedCanvasCourses(state.courses, course()), suppressed: [] };
+    state.composer.weeklyPlan = { ...nextCanvasWeek(new Date(), timeZone()), courseIds: academicCourse()?.subjectIds || [course().id], subjectSelection: 'all', suppressed: [] };
     fillWeekDates(); applyCanvasPlan();
   }
+  if (academicCourse() && state.composer.weeklyPlan?.subjectSelection === 'all') state.composer.weeklyPlan.courseIds = [...academicCourse().subjectIds];
 }
 function fillWeekDates() {
   const plan = state.composer.weeklyPlan;
@@ -120,10 +153,20 @@ function applyCanvasPlan() {
   const config = state.composer.weeklyPlan;
   if (!config || !isWeekly()) return;
   try {
+    const allowed = new Set(academicCourse()?.subjectIds || state.courses.filter(c => !groupForSubject(c)).map(c => c.id));
+    config.courseIds = config.courseIds.filter(id => allowed.has(id));
     const selected = state.courses.filter(c => config.courseIds.includes(c.id));
     const result = planCanvasWeek(selected, { ...config, timeZone: timeZone() });
     const existing = state.composer.weeklyEntries || [];
-    const edited = existing.filter(entry => !entry.generated && (entry.subject || entry.event || entry.preparation || entry.notes));
+    const freshEntries = new Map(result.entries.map(entry => [`${entry.courseId}:${entry.sourceEventId}`, entry]));
+    const edited = existing.filter(entry => !entry.generated && (entry.subject || entry.event || entry.preparation || entry.notes)).map(entry => {
+      const fresh = freshEntries.get(`${entry.courseId}:${entry.sourceEventId}`);
+      if (entry.sourceEventId && !fresh && entry.scheduleSource === 'calendar') {
+        result.warnings.push(`«${entry.event}» ya no aparece en el calendario de este periodo. Revisa o elimina el apartado.`);
+        return { ...entry, calendarStale: true };
+      }
+      return refreshEditedCalendarSchedule(entry, fresh);
+    });
     const editedKeys = new Set(edited.filter(entry => entry.sourceEventId).map(entry => `${entry.courseId}:${entry.sourceEventId}`));
     const generated = result.entries.filter(entry => !(config.suppressed || []).includes(entry.id) && !editedKeys.has(`${entry.courseId}:${entry.sourceEventId}`));
     const byId = new Map([...generated, ...edited].map(entry => [entry.id, entry]));
@@ -138,43 +181,51 @@ function chooseTemplate(id) {
   state.composer.customSubject = null;
   state.composer.customBody = null;
   ensureWeeklyFields();
+  if (state.composer.recipientMode === 'all') state.composer.selectedStudentIds = recipientRoster().filter(s => isValidEmail(s.email)).map(s => s.id);
 }
 
-function freshComposer(c = state.courses[0], t = state.templates[0]) {
+function freshComposer(c = state.courses[0], t = state.templates[0], academicId) {
   const composer = { courseId: c?.id || '', templateId: t?.id || '', kind: t?.kind || 'single', sessionId: '', fields: {}, selectedStudentIds: (c?.students || []).filter(s => isValidEmail(s.email)).map(s => s.id), customSubject: null, customBody: null, draftId: null };
   state.composer = composer;
   composer.recipientMode = 'all';
+  composer.academicCourseId = groupForSubject(c, academicId)?.id || '';
   if (c) {
-    const next = liveCourse(c) ? planCanvasWeek([c], { ...nextCanvasWeek(new Date(), timeZone()), timeZone: timeZone() }).entries.find(entry => entry.sessionId) : null;
-    chooseSession(next?.sessionId || deriveSessions(c)[0]?.id || '', false);
+    const next = liveCourse(c) ? calendarEntries(c).find(entry => entry.scheduleSource === 'calendar') : null;
+    chooseSession(next ? `event:${next.sourceEventId}` : deriveSessions(c)[0]?.id || '', false);
   }
   ensureWeeklyFields();
+  composer.selectedStudentIds = recipientRoster().filter(s => isValidEmail(s.email)).map(s => s.id);
   return composer;
 }
-function canvasSessionFields(c, id) {
+function canvasSessionFields(c, id, eventId = '') {
   const session = c ? deriveSessions(c).find(s => s.id === id) : null;
-  const fields = { course_name: c?.name || '', subject: c?.subject || c?.name || '', day: session?.day || '', month: session?.month || '', year: session?.year || '', time: session?.time || '', session_name: session?.title || '', preparation: session?.preparation || '', meeting_link: '', extra_notes: '' };
-  if (liveCourse(c) && session) {
-    const startDate = c.calendarRange?.startDate || state.canvasLastSync?.startDate || dayInZone(new Date(), timeZone());
-    const endDate = c.calendarRange?.endDate || state.canvasLastSync?.endDate || nextCanvasWeek(new Date(), timeZone()).endDate;
-    if (endDate >= startDate) {
-      const matched = planCanvasWeek([c], { startDate, endDate, timeZone: timeZone() }).entries.find(entry => entry.sessionId === session.id);
-      const event = c.calendarEvents?.find(event => String(event.id) === matched?.sourceEventId);
-      if (event?.startAt) {
-        const [year, month, day] = (event.allDay && event.day ? event.day : dayInZone(event.startAt, timeZone())).split('-');
-        Object.assign(fields, { day: String(Number(day)), month: new Intl.DateTimeFormat('es-ES', { month: 'long', timeZone: 'UTC' }).format(new Date(`${year}-${month}-01T12:00:00Z`)), year,
-          time: event.allDay ? '' : new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: timeZone() }).format(new Date(event.startAt)) });
-      }
-    }
+  const fields = { course_name: academicName(c), subject: c ? subjectName(c) : '', day: session?.day || '', month: session?.month || '', year: session?.year || '', time: session?.time || '', end_time: '', session_name: session?.title || '', preparation: session?.preparation || '', meeting_link: '', extra_notes: '' };
+  const entry = calendarEntries(c).find(item => eventId ? item.sourceEventId === eventId : id && item.sessionId === id);
+  if (entry) {
+    Object.assign(fields, { day: entry.day || '', month: entry.month ? new Intl.DateTimeFormat('es-ES', { month: 'long', timeZone: 'UTC' }).format(new Date(`2000-${entry.month}-01T12:00:00Z`)) : '', year: entry.year || '', time: entry.startTime || '', end_time: entry.endTime || '', session_name: entry.event,
+      preparation: session?.preparation || entry.preparation || '' });
   }
   return fields;
 }
 function chooseSession(id, reset = true) {
-  state.composer.sessionId = id;
-  state.composer.fields = canvasSessionFields(course(), id);
+  const entries = calendarEntries(course());
+  const entry = id.startsWith('event:') ? entries.find(item => item.sourceEventId === id.slice(6)) : entries.find(item => item.sessionId === id && item.scheduleSource === 'calendar');
+  state.composer.sessionId = entry?.sessionId || (id.startsWith('event:') ? '' : id);
+  state.composer.calendarEventId = entry?.scheduleSource === 'calendar' ? entry.sourceEventId : '';
+  state.composer.fields = canvasSessionFields(course(), state.composer.sessionId, state.composer.calendarEventId);
   state.composer.canvasValues = structuredClone(state.composer.fields);
   state.composer.canvasNotice = '';
   if (reset) { state.composer.customSubject = null; state.composer.customBody = null; }
+}
+function classOptions(c) {
+  const entries = calendarEntries(c).filter(entry => entry.scheduleSource === 'calendar');
+  const represented = new Set(entries.map(entry => entry.sessionId).filter(Boolean));
+  return [...entries.map(entry => ({ id: `event:${entry.sourceEventId}`, title: `${entry.event} · ${entry.scheduleLabel}` })),
+    ...deriveSessions(c).filter(session => !represented.has(session.id)).map(session => ({ ...session, title: `${session.title}${liveCourse(c) ? ' · Módulo de Canvas' : ''}` }))];
+}
+function academicSelector() {
+  const groups = academicGroups(), unassigned = state.courses.some(subject => !groupForSubject(subject));
+  return `<label class="field">Curso académico<select id="academic-course-select">${state.composer.academicSelectionError ? '<option value="" selected disabled>Revisar curso del borrador</option>' : ''}${options(groups, state.composer.academicCourseId, group => `${group.name}${group.academicPeriod ? ` · ${group.academicPeriod}` : ''}`)}${unassigned || !groups.length ? `<option value="" ${!academicCourse() && !state.composer.academicSelectionError ? 'selected' : ''}>Sin curso académico identificado</option>` : ''}</select></label>`;
 }
 function variables() {
   return { ...state.composer.fields, weekly_agenda: isWeekly() ? composeWeeklyAgenda(state.composer.weeklyEntries).text : '', coordinator_name: state.settings.name, signature: state.settings.signature };
@@ -213,9 +264,12 @@ function updateSaveStatus(label) {
 }
 
 function render() {
+  academicGroupSnapshot = academicCourses(state.courses);
+  try {
   if (!state.composer) freshComposer();
+  ensureAcademicSelection();
   ensureWeeklyFields();
-  const nav = [{ id: 'compose', name: 'Crear correo', icon: 'mail' }, { id: 'courses', name: 'Mis cursos', icon: 'book', count: state.courses.length }, { id: 'templates', name: 'Plantillas', icon: 'template' }, { id: 'drafts', name: 'Borradores', icon: 'draft', count: state.drafts.length }];
+  const nav = [{ id: 'compose', name: 'Crear correo', icon: 'mail' }, { id: 'courses', name: 'Mis cursos', icon: 'book', count: academicGroups().length }, { id: 'templates', name: 'Plantillas', icon: 'template' }, { id: 'drafts', name: 'Borradores', icon: 'draft', count: state.drafts.length }];
   $('#app').innerHTML = `<aside class="sidebar">
     <a href="#" class="brand" data-action="nav" data-view="compose"><span class="brand-mark">${icon('book')}</span><span>campus<span class="brand-caption">COORDINACIÓN</span></span></a>
     <div class="workspace-label">TU ESPACIO DE TRABAJO</div>
@@ -229,6 +283,7 @@ function render() {
   if (view === 'compose' && course()) updatePreview();
   updateSaveStatus();
   updateThemeControls();
+  } finally { academicGroupSnapshot = null; }
 }
 function pageHeading(eyebrow, title, subtitle, action = '') {
   return `<div class="page-heading"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`;
@@ -244,7 +299,7 @@ function updateCanvasBar() {
 }
 function canvasConnectionModal() {
   activeModal = { type: 'canvas' };
-  showModal('Conectar con Canvas', `<p class="modal-intro">Inicia sesión con tu cuenta de coordinación. Campus leerá los cursos, estudiantes, módulos, clases y entregas directamente de Canvas.</p>${canvasStatus.connected ? `<div class="connection-account">${icon('check')} Conectado como ${esc(canvasStatus.user?.name || 'usuario de Canvas')}<br><small>${esc(canvasStatus.baseUrl)}</small></div>` : ''}
+  showModal('Conectar con Canvas', `<p class="modal-intro">Inicia sesión con tu cuenta de coordinación. Campus leerá las asignaturas, estudiantes, módulos, clases y entregas directamente de Canvas; se agruparán por curso académico.</p>${canvasStatus.connected ? `<div class="connection-account">${icon('check')} Conectado como ${esc(canvasStatus.user?.name || 'usuario de Canvas')}<br><small>${esc(canvasStatus.baseUrl)}</small></div>` : ''}
     <label class="field">Dirección de Canvas<input id="canvas-base-url" type="url" value="${esc(canvasStatus.baseUrl || 'https://hesperides.instructure.com')}" placeholder="https://tu-universidad.instructure.com"></label>
     <p class="field-help">Se abrirá la página de acceso de tu universidad. Los datos descargados y la sesión se guardan en este ordenador.</p>
     <details class="optional-fields"><summary>Acceso alternativo con token ${icon('plus')}</summary><p class="small muted">Si tu universidad bloquea el acceso en la ventana de la aplicación, puedes usar un token personal de Canvas.</p><label class="field">Token de acceso<input id="canvas-token" type="password" autocomplete="off" spellcheck="false"></label></details>
@@ -265,7 +320,7 @@ async function connectCanvas() {
 }
 async function syncCanvas({ notify = true, selectConnectedCourse = false } = {}) {
   if (canvasBusy) return;
-  canvasBusy = true; canvasProgress = 'Leyendo cursos y estudiantes de Canvas…'; updateCanvasBar();
+  canvasBusy = true; canvasProgress = 'Leyendo asignaturas y estudiantes de Canvas…'; updateCanvasBar();
   try {
     const period = state.composer?.weeklyPlan || nextCanvasWeek(new Date(), timeZone());
     validateWeekRange(period.startDate, period.endDate);
@@ -284,7 +339,7 @@ async function syncCanvas({ notify = true, selectConnectedCourse = false } = {})
     if (isWeekly()) { ensureWeeklyFields(); applyCanvasPlan(); }
     canvasStatus = { ...canvasStatus, connected: true, user: result.user, baseUrl: result.baseUrl, lastSyncedAt: result.syncedAt, error: null };
     await saveNow(); render();
-    if (notify) toast(`${result.courses.length} cursos actualizados desde Canvas.${result.warnings?.length ? ' Revisa los avisos de sincronización.' : ''}`);
+    if (notify) toast(`${result.courses.length} asignaturas actualizadas desde Canvas.${result.warnings?.length ? ' Revisa los avisos de sincronización.' : ''}`);
   } catch (error) {
     canvasStatus = { ...canvasStatus, error: error.message };
     toast(`Canvas: ${error.message}`, true);
@@ -308,21 +363,28 @@ async function initializeCanvas() {
   canvasTimer = setInterval(() => { if ((canvasStatus.connected || canvasStatus.mode) && !canvasBusy && !activeModal && !document.activeElement?.matches('input,textarea,select')) syncCanvas({ notify: false }).catch(() => {}); }, 15 * 60 * 1000);
 }
 function canvasSettingsPanel() {
-  return `<section class="panel canvas-settings"><div class="section-heading">${icon('book')}<h2>Conexión con Canvas</h2>${button('canvas-connect', canvasStatus.connected ? 'Gestionar cuenta' : 'Conectar Canvas', 'external', 'btn compact')}</div><p>Los cursos, estudiantes, contenidos, fechas y entregas se leen de Canvas al iniciar y cada 15 minutos mientras la aplicación está abierta. Los correos se preparan y guardan localmente.</p><label class="field">Zona horaria del calendario<select data-setting="timeZone">${['Europe/Vienna', 'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'UTC'].map(zone => `<option ${timeZone() === zone ? 'selected' : ''}>${zone}</option>`).join('')}</select></label><p class="small muted">Las fechas publicadas con hora se muestran en esta zona. Las fechas escritas en los títulos de los módulos se conservan como aparecen en Canvas.</p></section>`;
+  return `<section class="panel canvas-settings"><div class="section-heading">${icon('book')}<h2>Conexión con Canvas</h2>${button('canvas-connect', canvasStatus.connected ? 'Gestionar cuenta' : 'Conectar Canvas', 'external', 'btn compact')}</div><p>Las asignaturas, estudiantes, contenidos, fechas y entregas se leen de Canvas al iniciar y cada 15 minutos mientras la aplicación está abierta. Los correos se preparan y guardan localmente.</p><label class="field">Zona horaria del calendario<select data-setting="timeZone">${['Europe/Vienna', 'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'UTC'].map(zone => `<option ${timeZone() === zone ? 'selected' : ''}>${zone}</option>`).join('')}</select></label><p class="small muted">Las fechas publicadas con hora se muestran en esta zona. Las fechas escritas en los títulos de los módulos se conservan como aparecen en Canvas.</p></section>`;
 }
 function rosterNotice(c) {
   const warnings = [];
   if (c.syncStatus?.students === 'error') warnings.push('No se pudo actualizar el listado de estudiantes. Se conserva la última copia local; revisa los permisos de tu cuenta Canvas.');
   const missing = c.students.filter(s => !isValidEmail(s.email)).length;
   if (missing) warnings.push(`Canvas no facilita un correo válido para ${missing} estudiantes. No se incluyen en CCO. Tu cuenta necesita permiso para ver sus direcciones.`);
-  if (!c.students.length && c.syncStatus?.students !== 'error') warnings.push('Canvas no devuelve estudiantes activos en este curso.');
+  if (!c.students.length && c.syncStatus?.students !== 'error') warnings.push('Canvas no devuelve estudiantes activos en esta asignatura.');
+  return warnings.map(message => `<p class="notice roster-notice">${esc(message)}</p>`).join('');
+}
+function composerRosterNotice() {
+  const group = academicCourse();
+  if (!isWeekly() || !group) return rosterNotice(course());
+  const warnings = [...group.rosterWarnings];
+  if (recipientRoster().some(s => !isValidEmail(s.email))) warnings.push('Los estudiantes sin correo disponible no se incluyen en CCO.');
   return warnings.map(message => `<p class="notice roster-notice">${esc(message)}</p>`).join('');
 }
 function canvasWeekControls() {
   const plan = state.composer.weeklyPlan;
   if (!liveCourse(course()) || !plan) return '';
-  const available = state.courses.filter(c => liveCourse(c) && c.source.baseUrl === course().source.baseUrl && String(c.source.userId) === String(course().source.userId));
-  return `<div class="canvas-week"><div class="section-heading">${icon('book')}<strong>Semana desde Canvas</strong><span class="tag">Automático</span></div><p>Las clases, entregas y preparación se completan con el calendario y el orden de los módulos.</p><div class="two-fields"><label class="field">Inicio del calendario<input type="date" data-week-range="startDate" value="${esc(plan.startDate)}"></label><label class="field">Fin del calendario<input type="date" data-week-range="endDate" value="${esc(plan.endDate)}"></label></div><details class="week-sources"><summary>Asignaturas incluidas (${plan.courseIds.length})</summary><p class="small muted">Se proponen los cursos con el mismo grupo de estudiantes. Los destinatarios proceden únicamente del curso seleccionado arriba.</p>${available.map(c => `<label><input type="checkbox" data-week-course="${esc(c.id)}" ${plan.courseIds.includes(c.id) ? 'checked' : ''}><span>${esc(c.subject || c.name)}</span></label>`).join('')}</details>${button('canvas-fill-week', 'Actualizar semana desde Canvas', 'down', 'btn compact', canvasBusy ? 'disabled' : '')}${!state.composer.weeklyEntries.length ? '<p class="notice">No hay actividades publicadas para este periodo en los cursos seleccionados.</p>' : ''}${(state.composer.planWarnings || []).map(w => `<p class="notice">${esc(w)}</p>`).join('')}</div>`;
+  const available = groupSubjects().filter(c => liveCourse(c) && c.source.baseUrl === course().source.baseUrl && String(c.source.userId) === String(course().source.userId));
+  return `<div class="canvas-week"><div class="section-heading">${icon('book')}<strong>Semana desde Canvas</strong><span class="tag">Automático</span></div><p>Las clases, entregas y preparación se completan con el calendario y el orden de los módulos.</p><div class="two-fields"><label class="field">Inicio del calendario<input type="date" data-week-range="startDate" value="${esc(plan.startDate)}"></label><label class="field">Fin del calendario<input type="date" data-week-range="endDate" value="${esc(plan.endDate)}"></label></div><details class="week-sources"><summary>Asignaturas incluidas (${plan.courseIds.length})</summary><p class="small muted">Asignaturas de este curso académico, identificadas en Canvas. Desmarcar una asignatura cambia la agenda, no el grupo destinatario.</p>${available.map(c => `<label><input type="checkbox" data-week-course="${esc(c.id)}" ${plan.courseIds.includes(c.id) ? 'checked' : ''}><span>${esc(subjectName(c))}</span></label>`).join('')}</details>${button('canvas-fill-week', 'Actualizar semana desde Canvas', 'down', 'btn compact', canvasBusy ? 'disabled' : '')}${!state.composer.weeklyEntries.length ? '<p class="notice">No hay actividades publicadas para este periodo en las asignaturas seleccionadas.</p>' : ''}${(state.composer.planWarnings || []).map(w => `<p class="notice">${esc(w)}</p>`).join('')}</div>`;
 }
 function emptyState(title, description, actions = '') {
   return `<div class="empty-state"><span class="empty-icon">${icon('book')}</span><h2>${title}</h2><p>${description}</p><div class="button-row">${actions}</div></div>`;
@@ -332,25 +394,29 @@ function composeView() {
   if (!course()) return heading + `<div class="welcome-panel"><div class="welcome-art">${icon('mail')}<span class="art-tag">Hecho para tu día a día</span></div><div class="welcome-content"><span class="eyebrow">EMPECEMOS POR TUS CURSOS</span><h2>De Canvas a un correo<br>con todo lo necesario.</h2><p>Inicia sesión en Canvas. Tus cursos, estudiantes y actividades se cargarán automáticamente para preparar los correos y el resumen de la semana.</p><div class="button-row">${button('canvas-connect', 'Conectar Canvas', 'external', 'btn primary', canvasBusy ? 'disabled' : '')}</div><button class="text-button demo-link" data-action="demo">Explorar con cursos de ejemplo ${icon('arrow')}</button><small>Los ejemplos están identificados y se pueden eliminar.</small></div></div><div class="feature-strip"><div>${icon('template')}<strong>Escribe una vez</strong><span>Reutiliza tus propias plantillas.</span></div><div>${icon('book')}<strong>El contexto de cada clase</strong><span>Preparación según el orden de Canvas.</span></div><div>${icon('shield')}<strong>Destinatarios en CCO</strong><span>Tú en «Para». Tus estudiantes, en privado.</span></div></div>`;
   const c = course(), sessions = deriveSessions(c), comp = state.composer;
   const session = sessions.find(s => s.id === comp.sessionId);
+  const group = academicCourse();
+  const schedule = calendarEntries(c).find(entry => comp.calendarEventId ? entry.sourceEventId === comp.calendarEventId : entry.sessionId === comp.sessionId);
   return heading + `<div class="composer-modes" aria-label="Tipo de correo">${button('compose-mode', 'Correo de una clase', 'mail', `mode-button ${!isWeekly() ? 'selected' : ''}`, 'data-mode="single"')}${button('compose-mode', 'Resumen semanal', 'book', `mode-button ${isWeekly() ? 'selected' : ''}`, 'data-mode="weekly"')}<span>Una semana. Todas las asignaturas.</span></div><div class="composer-toolbar"><div class="workflow"><span class="workflow-step current"><b>1</b> Preparar</span><span class="workflow-line"></span><span class="workflow-step"><b>2</b> Revisar</span><span class="workflow-line"></span><span class="workflow-step"><b>3</b> Abrir en Gmail</span></div><span class="save-status" id="save-status"></span></div>
     <div class="composer-layout"><div class="composer-form">
       <section class="panel"><div class="section-heading"><span class="section-number">01</span><h2>Curso y plantilla</h2></div>
-        <label class="field">${isWeekly() ? 'Curso o grupo destinatario' : 'Curso'}<select id="course-select">${options(state.courses, c.id, x => `${x.name}${x.isDemo ? ' · Ejemplo' : ''}`)}</select></label>
-        <div class="course-summary"><span class="course-monogram">${esc(c.code?.slice(0, 3) || 'CUR')}</span><div><strong>${esc(c.subject || c.name)}</strong><span>${esc(c.code || 'Curso local')} <i>·</i> ${c.students.length} estudiantes</span></div><span class="tag ${c.isDemo ? 'amber' : ''}">${c.isDemo ? 'Ejemplo' : liveCourse(c) ? 'Canvas' : 'Local'}</span></div>
+        ${academicSelector()}
+        ${!isWeekly() || !group ? `<label class="field">Asignatura<select id="course-select">${options(groupSubjects(), c.id, x => `${subjectName(x)}${x.isDemo ? ' · Ejemplo' : ''}`)}</select></label>` : ''}
+        <div class="course-summary"><span class="course-monogram">${esc(group ? `${group.studyYear}º` : c.code?.slice(0, 3) || 'ASG')}</span><div><strong>${esc(group?.name || subjectName(c))}</strong><span>${group ? `${group.subjectIds.length} asignaturas · ` : ''}${recipientRoster().length} estudiantes${group?.academicPeriod ? ` · ${esc(group.academicPeriod)}` : ''}</span></div><span class="tag ${c.isDemo ? 'amber' : ''}">${c.isDemo ? 'Ejemplo' : liveCourse(c) ? 'Canvas' : 'Local'}</span></div>
         <label class="field">Plantilla de correo<select id="template-select">${options(state.templates, comp.templateId)}</select></label>
         <p class="field-help">${icon('template')}${esc(template()?.description || 'Personaliza el correo a partir de esta plantilla.')}</p>
-        ${isWeekly() ? '<p class="weekly-help">La lista de estudiantes procede de este grupo. Puedes incluir otras asignaturas sin cambiar los destinatarios.</p>' : ''}
+        ${isWeekly() && group ? '<p class="weekly-help">El resumen reúne las asignaturas del curso académico. Sus estudiantes se incluyen una sola vez en CCO.</p>' : ''}
       </section>
       ${isWeekly() ? weeklyComposerView() : `<section class="panel"><div class="section-heading"><span class="section-number">02</span><h2>Los detalles de la clase</h2><span class="tag">Editables</span></div>
-        <label class="field">Clase síncrona<select id="session-select"><option value="">Introducir los datos manualmente</option>${options(sessions, comp.sessionId, s => s.title)}</select></label>
-        ${!sessions.length ? '<p class="notice">No se detectaron clases síncronas. Puedes introducir la clase y la preparación manualmente.</p>' : ''}${comp.canvasNotice ? `<p class="notice">${esc(comp.canvasNotice)}</p>` : ''}
+        <label class="field">${liveCourse(c) ? 'Clase o actividad del calendario' : 'Clase síncrona'}<select id="session-select">${calendarSelectionError() ? '<option value="" selected disabled>Actividad fuera del calendario actual</option>' : ''}<option value="">Introducir los datos manualmente</option>${options(classOptions(c), comp.calendarEventId ? `event:${comp.calendarEventId}` : comp.sessionId, s => s.title)}</select></label>
+        ${schedule?.scheduleLabel ? `<p id="class-schedule" class="calendar-schedule">${icon('clock')}<span><strong>${schedule.scheduleSource === 'calendar' ? 'Horario del calendario' : 'Fecha del módulo'}</strong>${esc(schedule.scheduleLabel)}</span></p>` : ''}
+        ${!classOptions(c).length ? '<p class="notice">No hay actividades de calendario ni clases publicadas en los módulos de esta asignatura.</p>' : ''}${comp.canvasNotice ? `<p class="notice">${esc(comp.canvasNotice)}</p>` : ''}
         <div class="two-fields">${field('course_name', 'Nombre del curso')}${field('subject', 'Asignatura')}</div>
         ${field('session_name', 'Nombre de la clase')}
-        <div class="date-fields">${field('day', 'Día', 'Ej. 14')}${field('month', 'Mes', 'Ej. octubre')}${field('year', 'Año', 'Ej. 2026')}${field('time', 'Hora', 'Ej. 18:00')}</div>
-        <div class="preparation-box"><div class="preparation-heading">${icon('book')}<strong>Antes de la clase</strong><span>SEGÚN CANVAS</span></div><label class="field">Preparación hasta<textarea data-field="preparation" rows="3" placeholder="Indica la última sesión o material que deben revisar">${esc(comp.fields.preparation)}</textarea></label><p class="evidence">${icon('info')}${esc(session?.evidence || 'Introduce la preparación a partir de la estructura de tu curso.')}</p>${session ? button('show-structure', 'Ver estructura del curso', 'arrow', 'text-button') : ''}</div>
+        <div class="date-fields">${field('day', 'Día', 'Ej. 14')}${field('month', 'Mes', 'Ej. octubre')}${field('year', 'Año', 'Ej. 2026')}${field('time', 'Hora', 'Ej. 18:00')}</div>${field('end_time', 'Hora de fin', 'Según el calendario')}
+        <div class="preparation-box"><div class="preparation-heading">${icon('book')}<strong>Antes de la clase</strong><span>SEGÚN CANVAS</span></div><label class="field">Preparación hasta<textarea data-field="preparation" rows="3" placeholder="Indica la última sesión o material que deben revisar">${esc(comp.fields.preparation)}</textarea></label><p class="evidence">${icon('info')}${esc(session?.evidence || 'Introduce la preparación a partir de la estructura de tu curso.')}</p>${session ? button('show-structure', 'Ver estructura de la asignatura', 'arrow', 'text-button') : ''}</div>
         <details class="optional-fields"><summary>Más detalles <span>Enlace y notas adicionales</span>${icon('plus')}</summary>${field('meeting_link', 'Enlace de la clase', 'https://…')}${field('extra_notes', 'Notas adicionales', 'Información que quieras añadir', true)}</details>
       </section>`}
-      <section class="panel"><div class="section-heading"><span class="section-number">03</span><h2>Destinatarios</h2><span class="tag">CCO</span></div><div class="recipient-summary"><span class="recipient-icon">${icon('people')}</span><div><strong id="recipient-count">${selectedStudents().length} de ${c.students.length} estudiantes</strong><p>Solo tú apareces en «Para».</p></div>${button('recipients', 'Elegir', null, 'btn compact')}</div>${liveCourse(c) ? rosterNotice(c) : !c.students.length ? `<p class="notice">Añade estudiantes o importa su listado CSV desde Mis cursos.</p>${button('manage-course', 'Añadir estudiantes', 'plus', 'text-button', `data-id="${esc(c.id)}"`)}` : ''}</section>
+      <section class="panel"><div class="section-heading"><span class="section-number">03</span><h2>Destinatarios</h2><span class="tag">CCO</span></div><div class="recipient-summary"><span class="recipient-icon">${icon('people')}</span><div><strong id="recipient-count">${selectedStudents().length} de ${recipientRoster().length} estudiantes</strong><p>Solo tú apareces en «Para».</p></div>${button('recipients', 'Elegir', null, 'btn compact')}</div>${liveCourse(c) ? composerRosterNotice() : !c.students.length ? `<p class="notice">Añade estudiantes o importa su listado CSV desde Mis cursos.</p>${button('manage-course', 'Añadir estudiantes', 'plus', 'text-button', `data-id="${esc(c.id)}"`)}` : ''}</section>
     </div><aside class="preview-column"><div class="preview-heading"><div><span class="preview-dot"></span><strong>Tu correo, en tiempo real</strong></div><span>VISTA PREVIA</span></div><div class="email-card"><div class="email-card-top"><span>${icon('mail')} Nuevo mensaje</span><div class="window-dots"><i></i><i></i><i></i></div></div><div class="email-meta"><div><span>Para</span><strong id="preview-to"></strong>${button('nav', 'Cambiar', null, 'text-button tiny', 'data-view="settings"')}</div><div><span>CCO</span><button class="recipient-chip" data-action="recipients" id="preview-bcc"></button><span class="private-label">${icon('shield')} Privados</span></div></div><div id="email-subject" class="email-subject"></div><div id="email-body" class="email-body"></div><div class="email-bottom"><span>Preparado con Campus</span>${button('edit-mail', 'Editar texto', 'edit', 'text-button')}</div></div><div id="preview-validation"></div><div class="preview-actions">${button('gmail', 'Abrir borrador en Gmail', 'external', 'btn primary gmail-button')}${button('save-draft', 'Guardar borrador', 'draft', 'btn')}${button('copy-mail', 'Copiar', 'copy', 'btn')}</div><p class="handoff-note">${icon('info')} Gmail se abrirá con el correo preparado en texto sin formato. Revísalo y envíalo desde allí cuando quieras.</p><div class="local-note">${icon('leaf')} Tus correos y borradores se guardan en este equipo.</div></aside></div>`;
 }
 
@@ -373,7 +439,8 @@ function weeklyEntryView(entry, index) {
   const sessions = source ? deriveSessions(source) : [];
   const valueField = (key, label, placeholder = '', area = false) => `<label class="field">${label}${area ? `<textarea data-weekly-field="${key}" data-entry="${esc(entry.id)}" rows="3" placeholder="${esc(placeholder)}">${esc(entry[key])}</textarea>` : `<input data-weekly-field="${key}" data-entry="${esc(entry.id)}" value="${esc(entry[key])}" placeholder="${esc(placeholder)}">`}</label>`;
   return `<article class="weekly-entry" data-entry-id="${esc(entry.id)}"><header><strong>Apartado ${index + 1}</strong><div>${button('move-weekly-entry', '', 'arrow', 'icon-button move-up', `data-id="${esc(entry.id)}" data-direction="-1" aria-label="Subir apartado ${index + 1}" ${index === 0 ? 'disabled' : ''}`)}${button('move-weekly-entry', '', 'arrow', 'icon-button move-down', `data-id="${esc(entry.id)}" data-direction="1" aria-label="Bajar apartado ${index + 1}" ${index === state.composer.weeklyEntries.length - 1 ? 'disabled' : ''}`)}${button('remove-weekly-entry', '', 'trash', 'icon-button', `data-id="${esc(entry.id)}" aria-label="Eliminar apartado ${index + 1}"`)}</div></header>
-    <label class="field">Curso de origen<select data-weekly-select="course" data-entry="${esc(entry.id)}"><option value="">Introducir los datos manualmente</option>${options(state.courses, entry.courseId, c => c.subject || c.name)}</select></label>
+    ${entry.scheduleLabel ? `<p class="entry-schedule calendar-schedule">${icon('clock')}<span><strong>${entry.scheduleSource === 'calendar' ? 'Calendario de Canvas' : entry.scheduleSource === 'assignment' ? 'Entrega en Canvas' : 'Fecha del módulo'}</strong>${esc(entry.scheduleLabel)}</span></p>` : ''}
+    <label class="field">Asignatura de origen<select data-weekly-select="course" data-entry="${esc(entry.id)}"><option value="">Introducir los datos manualmente</option>${options(academicCourse() ? subjectsForAcademicCourse(state.courses, academicCourse()) : state.courses, entry.courseId, subjectName)}</select></label>
     <div class="two-fields">${valueField('subject', 'Asignatura', 'Ej. Finanzas II')}${valueField('event', 'Clase, tutoría o examen', 'Ej. Tutoría 2')}</div>
     ${valueField('teacher', 'Profesor (opcional)', 'Nombre del profesor')}
     ${source ? `<label class="field">Clase de referencia para la preparación<select data-weekly-select="session" data-entry="${esc(entry.id)}"><option value="">Sin clase de referencia</option>${options(sessions, entry.sessionId, s => s.title)}</select></label>` : ''}
@@ -394,8 +461,10 @@ function updatePreview() {
   $('#email-body').textContent = mail.body || 'El texto de tu correo aparecerá aquí.';
   $('#preview-to').textContent = state.settings.email || 'Añade tu correo en Ajustes';
   $('#preview-bcc').textContent = `${selectedStudents().length} estudiantes`;
-  $('#recipient-count').textContent = `${selectedStudents().length} de ${course().students.length} estudiantes`;
+  $('#recipient-count').textContent = `${selectedStudents().length} de ${recipientRoster().length} estudiantes`;
   const errors = composerDateErrors();
+  if (calendarSelectionError()) errors.push(calendarSelectionError());
+  if (state.composer.academicSelectionError) errors.push(state.composer.academicSelectionError);
   if (isWeekly()) errors.push(...weeklyErrors());
   else if (liveCourse(course()) && course().preparationComplete === false && state.composer.sessionId) errors.push('La estructura de Canvas está incompleta. Actualiza Canvas antes de usar la preparación de esta clase.');
   const unknown = mail.missing.filter(key => !VARIABLES.some(v => v.key === key));
@@ -412,7 +481,7 @@ function updatePreview() {
     } catch (err) { errors.push(err.message); }
   }
   $('#preview-validation').innerHTML = errors.length ? `<div class="validation-box">${icon('info')}<div>${errors.map(e => `<p>${esc(e)}</p>`).join('')}</div></div>` : `<div class="ready-note">${icon('check')} Todo listo para revisar en Gmail.</div>`;
-  if (liveCourse(course())) $('#preview-validation').insertAdjacentHTML('afterbegin', rosterNotice(course()));
+  if (liveCourse(course())) $('#preview-validation').insertAdjacentHTML('afterbegin', composerRosterNotice());
   const session = deriveSessions(course()).find(s => s.id === state.composer.sessionId);
   const evidence = !isWeekly() && $('.evidence');
   if (evidence && session) {
@@ -435,6 +504,7 @@ function weeklyErrors() {
   const entries = state.composer.weeklyEntries || [];
   const errors = composeWeeklyAgenda(entries).missing;
   entries.forEach((entry, index) => {
+    if (entry.calendarStale) errors.push(`Apartado ${index + 1}: la actividad ya no aparece en el calendario del periodo. Revísala antes de abrir Gmail.`);
     if (entry.preparationMode !== 'canvas') return;
     const source = state.courses.find(c => c.id === entry.courseId);
     const current = createWeeklyEntry(source, entry.sessionId);
@@ -464,12 +534,25 @@ function dateErrors(fields) {
 }
 
 function coursesView() {
-  return pageHeading('TODO EN SU SITIO', 'Tus cursos, a mano.', 'La estructura de Canvas y tus estudiantes, en un solo lugar.', `<div class="button-row">${button('import-json', 'Importar JSON', 'upload')}${button('import-canvas', 'CanvasManager', 'upload')}${button(canvasStatus.connected ? 'canvas-sync' : 'canvas-connect', canvasStatus.connected ? 'Actualizar Canvas' : 'Conectar Canvas', 'external', 'btn primary', canvasBusy ? 'disabled' : '')}</div>`) +
-    (state.courses.length ? `<div class="list-toolbar"><span><strong>${state.courses.length}</strong> cursos en este equipo</span><label class="search-input">${icon('search')}<input id="course-search" value="${esc(courseSearch)}" placeholder="Buscar curso o asignatura…" aria-label="Buscar cursos"></label></div><div class="course-grid" id="course-grid">${courseCards()}</div><div class="import-note">${icon('info')} Canvas se actualiza al iniciar y cada 15 minutos. Las importaciones de archivos siguen disponibles como alternativa local.</div>` : emptyState('Tu primer curso empieza aquí', 'Conecta Canvas para descargar tus cursos, su estructura y los estudiantes automáticamente.', button('demo', 'Explorar cursos de ejemplo', 'book')));
+  const groups = academicGroups();
+  return pageHeading('CURSOS Y ASIGNATURAS', 'Cada curso, sus asignaturas.', 'El curso académico reúne las asignaturas de un año de la titulación.', `<div class="button-row">${button('import-json', 'Importar JSON', 'upload')}${button('import-canvas', 'CanvasManager', 'upload')}${button(canvasStatus.connected ? 'canvas-sync' : 'canvas-connect', canvasStatus.connected ? 'Actualizar Canvas' : 'Conectar Canvas', 'external', 'btn primary', canvasBusy ? 'disabled' : '')}</div>`) +
+    (state.courses.length ? `<div class="list-toolbar"><span><strong>${groups.length}</strong> cursos académicos · ${state.courses.length} asignaturas</span><label class="search-input">${icon('search')}<input id="course-search" value="${esc(courseSearch)}" placeholder="Buscar curso o asignatura…" aria-label="Buscar cursos"></label></div><div class="academic-course-list" id="course-grid">${courseCards()}</div><div class="import-note">${icon('info')} El calendario de cada asignatura aporta las fechas y las horas. Canvas se actualiza al iniciar y cada 15 minutos.</div>` : emptyState('Tu primer curso empieza aquí', 'Conecta Canvas para organizar automáticamente tus cursos académicos y sus asignaturas.', button('demo', 'Explorar cursos de ejemplo', 'book')));
+}
+function subjectCard(c, index, groupId = '') {
+  return `<article class="course-card"><div class="course-card-top"><span class="course-monogram color-${index % 3}">${icon('book')}</span><span class="tag ${c.isDemo ? 'amber' : ''}">${c.isDemo ? 'Ejemplo' : liveCourse(c) ? 'Canvas' : 'Local'}</span></div><span class="course-code">ASIGNATURA</span><h2>${esc(subjectName(c))}</h2><div class="course-metrics"><span>${icon('people')}${c.students.length} estudiantes</span><span>${icon('clock')}${deriveSessions(c).length} clases</span></div>${liveCourse(c) ? rosterNotice(c) : ''}<div class="course-card-actions">${button('compose-course', 'Correo de la asignatura', 'arrow', 'text-button', `data-id="${esc(c.id)}" data-academic-id="${esc(groupId)}"`)}${button('manage-course', 'Gestionar', null, 'btn compact', `data-id="${esc(c.id)}"`)}</div></article>`;
 }
 function courseCards() {
-  const filtered = state.courses.filter(c => `${c.name} ${c.subject} ${c.code}`.toLowerCase().includes(courseSearch.toLowerCase()));
-  return filtered.length ? filtered.map((c, i) => `<article class="course-card"><div class="course-card-top"><span class="course-monogram color-${i % 3}">${esc(c.code?.slice(0, 3) || 'CUR')}</span><span class="tag ${c.isDemo ? 'amber' : ''}">${c.isDemo ? 'Ejemplo' : liveCourse(c) ? 'Canvas' : 'Local'}</span></div><span class="course-code">${esc(c.code || 'CURSO')}</span><h2>${esc(c.subject || c.name)}</h2><p>${esc(c.name)}</p><div class="course-metrics"><span>${icon('people')}${c.students.length} estudiantes</span><span>${icon('clock')}${deriveSessions(c).length} clases</span></div>${liveCourse(c) ? rosterNotice(c) : ''}<div class="course-card-actions">${button('compose-course', 'Crear correo', 'arrow', 'text-button', `data-id="${esc(c.id)}"`)}${button('manage-course', 'Gestionar', null, 'btn compact', `data-id="${esc(c.id)}"`)}</div></article>`).join('') : '<p class="muted">No hay cursos que coincidan con tu búsqueda.</p>';
+  const matches = value => value.toLowerCase().includes(courseSearch.toLowerCase());
+  const groups = academicGroups();
+  const sections = groups.map(group => {
+    const members = subjectsForAcademicCourse(state.courses, group).filter(c => matches(group.name) || matches(`${subjectName(c)} ${c.code}`));
+    if (!members.length) return '';
+    return `<section class="academic-course-card panel"><header><div><span class="eyebrow">CURSO ACADÉMICO · ${esc(group.academicPeriod)}</span><h2>${esc(group.name)}</h2><p>${group.subjectIds.length} asignaturas · ${academicCourseStudents(state.courses, group).length} estudiantes</p></div>${button('compose-academic-course', 'Preparar resumen semanal', 'mail', 'btn primary', `data-id="${esc(group.id)}"`)}</header><div class="course-grid">${members.map((c, index) => subjectCard(c, index, group.id)).join('')}</div></section>`;
+  }).filter(Boolean);
+  const assigned = new Set(groups.flatMap(group => group.subjectIds));
+  const unassigned = state.courses.filter(c => !assigned.has(c.id) && matches(`${c.name} ${c.subject} ${c.code}`));
+  if (unassigned.length) sections.push(`<section class="academic-course-card panel"><header><div><span class="eyebrow">ASIGNATURAS</span><h2>Sin curso académico identificado</h2><p>Estas asignaturas no incluyen una titulación y un año identificables en sus datos.</p></div></header><div class="course-grid">${unassigned.map((c, index) => subjectCard(c, index)).join('')}</div></section>`);
+  return sections.join('') || '<p class="muted">No hay cursos ni asignaturas que coincidan con tu búsqueda.</p>';
 }
 function templatesView() {
   return pageHeading('UN PUNTO DE PARTIDA, CADA VEZ', 'Tu voz. Tus plantillas.', 'Los detalles cambian. La forma de acompañar permanece.', button('new-template', 'Nueva plantilla', 'plus', 'btn primary')) + `<div class="template-grid">${state.templates.map((t, i) => `<article class="template-card"><div class="template-art art-${i % 3}"><div class="mini-document"><span></span><span></span><b>{{ asignatura }}</b><span></span><span></span></div><span class="template-art-icon">${icon(i % 3 === 0 ? 'clock' : i % 3 === 1 ? 'book' : 'mail')}</span></div><div class="template-content"><span class="eyebrow">${esc(t.category || 'PERSONALIZADA')}</span><h2>${esc(t.name)}</h2><p>${esc(t.description)}</p><div class="template-actions">${button('use-template', 'Usar plantilla', 'arrow', 'text-button', `data-id="${esc(t.id)}"`)}${button('edit-template', 'Editar', 'edit', 'btn compact', `data-id="${esc(t.id)}"`)}</div></div></article>`).join('')}</div><div class="token-guide">${icon('info')} Usa variables como <code>{{course_name}}</code>, <code>{{day}}</code> o <code>{{preparation}}</code>. Campus las sustituye con los datos de cada clase.</div>`;
@@ -495,7 +578,7 @@ function recipientsModal() {
 }
 function renderStudents() {
   if (!$('#student-list')) return;
-  const students = (course()?.students || []).filter(s => `${s.name} ${s.email}`.toLowerCase().includes(recipientSearch.toLowerCase()));
+  const students = recipientRoster().filter(s => `${s.name} ${s.email}`.toLowerCase().includes(recipientSearch.toLowerCase()));
   $('#selection-label').textContent = `${selectedStudents().length} seleccionados`;
   $('#student-list').innerHTML = students.length ? students.map(s => `<label class="student-row"><input type="checkbox" data-student-id="${esc(s.id)}" ${!isValidEmail(s.email) ? 'disabled' : ''} ${state.composer.selectedStudentIds.includes(s.id) ? 'checked' : ''}><span class="student-avatar">${esc(s.name?.slice(0, 1) || '@')}</span><span><strong>${esc(s.name)}</strong><small>${esc(s.email || 'Canvas no permite ver su correo')}</small></span></label>`).join('') : '<p class="muted empty-list">No hay estudiantes para mostrar.</p>';
 }
@@ -513,7 +596,7 @@ function courseModal(id) {
   const c = state.courses.find(c => c.id === id);
   activeModal = { type: 'course', id };
   if (liveCourse(c)) {
-    showModal('Curso de Canvas', `<p class="modal-intro"><strong>${esc(c.name)}</strong><br>${esc(c.code)} · ${esc(c.source.baseUrl)}</p><p>Los estudiantes y la estructura se actualizan directamente desde Canvas.</p>${rosterNotice(c)}<div class="roster-list">${c.students.map(s => `<div class="roster-row"><span><strong>${esc(s.name)}</strong><small>${esc(s.email || 'Canvas no permite ver su correo')}</small></span></div>`).join('')}</div><div class="course-source">${c.modules.length} módulos · ${deriveSessions(c).length} clases síncronas ${button('show-structure', 'Ver estructura', 'arrow', 'text-button', `data-id="${esc(id)}"`)}</div>`, button('close-modal', 'Cerrar'), true);
+    showModal('Asignatura de Canvas', `<p class="modal-intro"><strong>${esc(c.name)}</strong><br>${esc(c.code)} · ${esc(c.source.baseUrl)}</p><p>Los estudiantes, la estructura y el calendario de esta asignatura se actualizan directamente desde Canvas.</p>${rosterNotice(c)}<div class="roster-list">${c.students.map(s => `<div class="roster-row"><span><strong>${esc(s.name)}</strong><small>${esc(s.email || 'Canvas no permite ver su correo')}</small></span></div>`).join('')}</div><div class="course-source">${c.modules.length} módulos · ${deriveSessions(c).length} clases síncronas ${button('show-structure', 'Ver estructura', 'arrow', 'text-button', `data-id="${esc(id)}"`)}</div>`, button('close-modal', 'Cerrar'), true);
     return;
   }
   showModal(c ? 'Gestionar curso' : 'Añadir un curso', `<div class="two-fields"><label class="field">Curso o programa<input id="edit-course-name" value="${esc(c?.name || '')}" placeholder="Ej. Grado en Filosofía"></label><label class="field">Código<input id="edit-course-code" value="${esc(c?.code || '')}" placeholder="Ej. FIL-201"></label></div><label class="field">Asignatura<input id="edit-course-subject" value="${esc(c?.subject || '')}" placeholder="Ej. Ética"></label>${c ? `<div class="roster-header"><h3>Estudiantes <span class="tag">${c.students.length}</span></h3>${button('import-students', 'Importar CSV', 'upload', 'btn compact', `data-id="${esc(id)}"`)}</div><p class="small muted">CSV con columnas nombre y email. Se añaden estudiantes sin duplicar correos.</p><div class="add-student-row"><input id="new-student-name" aria-label="Nombre del estudiante" placeholder="Nombre"><input id="new-student-email" type="email" aria-label="Correo del estudiante" placeholder="Correo electrónico">${button('add-student', '', 'plus', 'btn', 'aria-label="Añadir estudiante"')}</div><div class="roster-list">${c.students.map(s => `<div class="roster-row"><span><strong>${esc(s.name)}</strong><small>${esc(s.email)}</small></span>${button('remove-student', '', 'trash', 'icon-button', `data-student="${esc(s.id)}" aria-label="Eliminar a ${esc(s.name)}"`)}</div>`).join('') || '<p class="empty-list muted">Este curso todavía no tiene estudiantes.</p>'}</div><div class="course-source">${c.modules.length} módulos locales · ${deriveSessions(c).length} clases síncronas detectadas ${button('show-structure', 'Ver estructura', 'arrow', 'text-button', `data-id="${esc(id)}"`)}</div>` : ''}`, `${c ? button('delete-course', 'Eliminar curso', 'trash', 'btn danger', `data-id="${esc(id)}"`) : ''}<span class="spacer"></span>${button('save-course', 'Guardar curso', 'check', 'btn primary')}`, true);
@@ -523,10 +606,11 @@ function structureModal(id) {
   if (!c) return;
   const liveIds = new Set(deriveSessions(c).map(s => s.moduleId));
   activeModal = { type: 'structure' };
-  showModal('La estructura de tu curso', `<p class="modal-intro">${esc(c.subject || c.name)} · El orden de Canvas determina qué material precede a cada clase.</p><div class="module-list">${c.modules.map(m => `<div class="module-item ${liveIds.has(m.id) ? 'live' : ''}"><div>${icon(liveIds.has(m.id) ? 'people' : 'book')}<strong>${esc(m.name)}</strong>${liveIds.has(m.id) ? '<span class="tag">Síncrona</span>' : ''}</div><ul>${m.items.map(i => `<li>${esc(i.title)}</li>`).join('')}</ul></div>`).join('') || '<p>No hay módulos importados. Introduce la preparación manualmente o importa la estructura de Canvas.</p>'}</div>`, button('close-modal', 'Cerrar'), true);
+  showModal('La estructura de tu asignatura', `<p class="modal-intro">${esc(subjectName(c))} · El orden de Canvas determina qué material precede a cada clase.</p><div class="module-list">${c.modules.map(m => `<div class="module-item ${liveIds.has(m.id) ? 'live' : ''}"><div>${icon(liveIds.has(m.id) ? 'people' : 'book')}<strong>${esc(m.name)}</strong>${liveIds.has(m.id) ? '<span class="tag">Síncrona</span>' : ''}</div><ul>${m.items.map(i => `<li>${esc(i.title)}</li>`).join('')}</ul></div>`).join('') || '<p>No hay módulos importados. Introduce la preparación manualmente o importa la estructura de Canvas.</p>'}</div>`, button('close-modal', 'Cerrar'), true);
 }
 
 function mergeCourses(incoming, { authoritativeCanvas = false } = {}) {
+  const oldRecipients = recipientRoster();
   const oldCourse = course(), oldSession = oldCourse ? deriveSessions(oldCourse).find(s => s.id === state.composer.sessionId) : null;
   for (const item of incoming) {
     const index = state.courses.findIndex(c => c.id === item.id);
@@ -534,7 +618,6 @@ function mergeCourses(incoming, { authoritativeCanvas = false } = {}) {
       const existing = state.courses[index];
       if (authoritativeCanvas && liveCourse(item)) {
         state.courses[index] = mergeCanvasCourse(existing, item);
-        if (state.composer.courseId === item.id) state.composer.selectedStudentIds = reconcileCanvasRecipients(existing, state.courses[index], state.composer.selectedStudentIds, state.composer.recipientMode);
         continue;
       }
       const students = new Map(existing.students.map(s => [s.email.toLowerCase(), s]));
@@ -544,11 +627,14 @@ function mergeCourses(incoming, { authoritativeCanvas = false } = {}) {
     } else state.courses.push(item);
   }
   if (!course()) freshComposer();
-  if (!isWeekly() && oldCourse && oldSession && incoming.some(c => c.id === oldCourse.id)) {
+  ensureAcademicSelection();
+  if (authoritativeCanvas && oldCourse?.id === course()?.id) state.composer.selectedStudentIds = reconcileCanvasRecipients({ students: oldRecipients }, { students: recipientRoster() }, state.composer.selectedStudentIds, state.composer.recipientMode);
+  if (!isWeekly() && oldCourse && incoming.some(c => c.id === oldCourse.id)) {
     const current = course(), nextSession = deriveSessions(current).find(s => s.id === state.composer.sessionId);
-    if (nextSession) {
-      const previousFields = state.composer.canvasValues || canvasSessionFields(oldCourse, oldSession.id);
-      const nextFields = canvasSessionFields(current, nextSession.id);
+    const hasEvent = state.composer.calendarEventId && calendarEntries(current).some(entry => entry.sourceEventId === state.composer.calendarEventId);
+    if (state.composer.calendarEventId ? hasEvent : nextSession) {
+      const previousFields = state.composer.canvasValues || canvasSessionFields(oldCourse, oldSession?.id || '', state.composer.calendarEventId);
+      const nextFields = canvasSessionFields(current, nextSession?.id || '', state.composer.calendarEventId);
       for (const key of Object.keys(nextFields)) if (state.composer.fields[key] === (previousFields[key] || '')) state.composer.fields[key] = nextFields[key] || '';
       state.composer.canvasValues = nextFields;
       state.composer.canvasNotice = 'Estructura de Canvas actualizada. Se han conservado los detalles que modificaste manualmente; revísalos antes de abrir Gmail.';
@@ -561,7 +647,7 @@ async function importCanvas() {
   const result = await api.importCanvas();
   if (!result) return;
   mergeCourses(result.courses);
-  toast(`${result.courses.length} cursos importados en este equipo.`);
+  toast(`${result.courses.length} ${result.courses.length === 1 ? 'asignatura importada' : 'asignaturas importadas'} en este equipo.`);
   if (result.warnings?.length) showModal('Importación completada con avisos', `<ul>${result.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>`, button('close-modal', 'Entendido'));
 }
 function chooseFile(task, accept) { fileTask = task; const input = $('#file-input'); input.accept = accept; input.value = ''; input.click(); }
@@ -572,7 +658,7 @@ async function handleFile(file) {
   if (fileTask.type === 'courses') {
     const courses = normalizeCourses(JSON.parse(text));
     if (!courses.length) throw new Error('No se encontraron cursos en este JSON. Usa un archivo con courses o con un curso y sus modules.');
-    mergeCourses(courses); toast(`${courses.length} cursos importados.`);
+    mergeCourses(courses); toast(`${courses.length} ${courses.length === 1 ? 'asignatura importada' : 'asignaturas importadas'}.`);
   } else {
     const c = state.courses.find(c => c.id === fileTask.id); if (!c) return;
     const parsed = parseStudentCsv(text);
@@ -623,7 +709,15 @@ const actions = {
   'import-students'(el) { preserveCourseEdits(); chooseFile({ type: 'students', id: el.dataset.id }, '.csv,text/csv'); },
   'add-course'() { courseModal(); },
   'manage-course'(el) { courseModal(el.dataset.id); },
-  'compose-course'(el) { freshComposer(state.courses.find(c => c.id === el.dataset.id)); view = 'compose'; scheduleSave(); render(); },
+  'compose-course'(el) { freshComposer(state.courses.find(c => c.id === el.dataset.id), state.templates.find(t => t.kind !== 'weekly'), el.dataset.academicId); view = 'compose'; scheduleSave(); render(); },
+  'compose-academic-course'(el) {
+    const group = academicGroups().find(group => group.id === el.dataset.id);
+    if (!group) return;
+    const target = state.templates.find(t => t.kind === 'weekly') || weeklyTemplate();
+    if (!state.templates.some(t => t.id === target.id)) state.templates.push(target);
+    freshComposer(subjectsForAcademicCourse(state.courses, group)[0], target, group.id);
+    view = 'compose'; scheduleSave(); render();
+  },
   'new-mail'() { freshComposer(); view = 'compose'; scheduleSave(); render(); },
   'compose-mode'(el) {
     const weekly = el.dataset.mode === 'weekly';
@@ -651,8 +745,8 @@ const actions = {
   },
   'show-structure'(el) { structureModal(el.dataset.id); },
   recipients: recipientsModal,
-  'select-all'() { state.composer.recipientMode = recipientSearch ? 'custom' : 'all'; const list = course().students.filter(s => isValidEmail(s.email) && `${s.name} ${s.email}`.toLowerCase().includes(recipientSearch.toLowerCase())); state.composer.selectedStudentIds = [...new Set([...state.composer.selectedStudentIds, ...list.map(s => s.id)])]; scheduleSave(); renderStudents(); updatePreview(); },
-  'select-none'() { state.composer.recipientMode = 'custom'; const list = new Set(course().students.filter(s => `${s.name} ${s.email}`.toLowerCase().includes(recipientSearch.toLowerCase())).map(s => s.id)); state.composer.selectedStudentIds = state.composer.selectedStudentIds.filter(id => !list.has(id)); scheduleSave(); renderStudents(); updatePreview(); },
+  'select-all'() { state.composer.recipientMode = recipientSearch ? 'custom' : 'all'; const list = recipientRoster().filter(s => isValidEmail(s.email) && `${s.name} ${s.email}`.toLowerCase().includes(recipientSearch.toLowerCase())); state.composer.selectedStudentIds = [...new Set([...state.composer.selectedStudentIds, ...list.map(s => s.id)])]; scheduleSave(); renderStudents(); updatePreview(); },
+  'select-none'() { state.composer.recipientMode = 'custom'; const list = new Set(recipientRoster().filter(s => `${s.name} ${s.email}`.toLowerCase().includes(recipientSearch.toLowerCase())).map(s => s.id)); state.composer.selectedStudentIds = state.composer.selectedStudentIds.filter(id => !list.has(id)); scheduleSave(); renderStudents(); updatePreview(); },
   'edit-mail': editMailModal,
   'apply-mail'() { state.composer.customSubject = $('#mail-subject').value; state.composer.customBody = $('#mail-body').value; closeModal(); scheduleSave(); updatePreview(); },
   'reset-mail'() { state.composer.customSubject = null; state.composer.customBody = null; closeModal(); scheduleSave(); updatePreview(); },
@@ -662,6 +756,8 @@ const actions = {
     if (mail.missing.length) throw new Error('Completa las variables pendientes antes de abrir Gmail.');
     if (!mail.subject.trim() || !mail.body.trim()) throw new Error('Añade el asunto y el mensaje.');
     const errors = [...composerDateErrors(), ...(isWeekly() ? weeklyErrors() : [])];
+    if (calendarSelectionError()) errors.push(calendarSelectionError());
+    if (state.composer.academicSelectionError) errors.push(state.composer.academicSelectionError);
     if (!isWeekly() && liveCourse(course()) && course().preparationComplete === false && state.composer.sessionId) errors.push('La estructura de Canvas está incompleta. Actualiza Canvas antes de usar la preparación de esta clase.');
     if (errors.length) throw new Error(errors.join(' '));
     const result = await api.openGmail({ to: state.settings.email, bcc: selectedStudents().map(s => s.email), subject: mail.subject, body: mail.body });
@@ -672,7 +768,7 @@ const actions = {
     const snapshot = structuredClone(state.composer);
     snapshot.customSubject = snapshot.customSubject ?? template()?.subject ?? '';
     snapshot.customBody = snapshot.customBody ?? template()?.body ?? '';
-    const item = { id, subject: mail.subject, courseName: course().name, updatedAt: new Date().toISOString(), composer: snapshot };
+    const item = { id, subject: mail.subject, courseName: academicCourse()?.name || state.composer.fields.course_name || subjectName(course()), updatedAt: new Date().toISOString(), composer: snapshot };
     const index = state.drafts.findIndex(d => d.id === id); if (index >= 0) state.drafts[index] = item; else state.drafts.push(item);
     await saveNow(); render(); toast('Borrador guardado en este equipo.');
   },
@@ -681,7 +777,8 @@ const actions = {
     if (!state.courses.some(c => c.id === d.composer.courseId)) throw new Error('El curso de este borrador ya no está disponible. Vuelve a importarlo para continuar.');
     state.composer = structuredClone(d.composer);
     state.composer.recipientMode = 'custom';
-    state.composer.selectedStudentIds = state.composer.selectedStudentIds.filter(id => course().students.some(s => s.id === id));
+    ensureAcademicSelection();
+    state.composer.selectedStudentIds = state.composer.selectedStudentIds.filter(id => recipientRoster().some(s => s.id === id));
     view = 'compose'; scheduleSave(); render();
   },
   'delete-draft'(el) { confirmDelete('Eliminar borrador', 'Se eliminará este borrador guardado en el equipo.', () => { state.drafts = state.drafts.filter(d => d.id !== el.dataset.id); if (state.composer.draftId === el.dataset.id) state.composer.draftId = null; scheduleSave(); render(); }); },
@@ -760,6 +857,17 @@ document.addEventListener('input', event => {
 });
 document.addEventListener('change', async event => {
   const el = event.target;
+  if (el.id === 'academic-course-select') {
+    const group = academicGroups().find(group => group.id === el.value);
+    const next = group ? subjectsForAcademicCourse(state.courses, group)[0] : state.courses.find(subject => !groupForSubject(subject));
+    const period = state.composer.weeklyPlan;
+    freshComposer(next, template(), group?.id);
+    if (isWeekly() && period && state.composer.weeklyPlan) {
+      Object.assign(state.composer.weeklyPlan, { startDate: period.startDate, endDate: period.endDate });
+      fillWeekDates(); applyCanvasPlan();
+    }
+    scheduleSave(); render();
+  }
   if (el.dataset.weekRange) {
     const plan = state.composer.weeklyPlan;
     plan[el.dataset.weekRange] = el.value;
@@ -772,9 +880,19 @@ document.addEventListener('change', async event => {
   if (el.dataset.weekCourse) {
     const plan = state.composer.weeklyPlan, ids = new Set(plan.courseIds);
     el.checked ? ids.add(el.dataset.weekCourse) : ids.delete(el.dataset.weekCourse);
-    plan.courseIds = [...ids]; applyCanvasPlan(); scheduleSave(); render();
+    plan.courseIds = [...ids]; plan.subjectSelection = 'custom'; applyCanvasPlan(); scheduleSave(); render();
   }
-  if (el.dataset.setting === 'timeZone') { applyCanvasPlan(); scheduleSave(); }
+  if (el.dataset.setting === 'timeZone') {
+    if (isWeekly()) applyCanvasPlan();
+    else if (course() && state.composer.canvasValues && !calendarSelectionError()) {
+      const fields = canvasSessionFields(course(), state.composer.sessionId, state.composer.calendarEventId);
+      for (const key of ['day', 'month', 'year', 'time', 'end_time']) {
+        if (state.composer.fields[key] === state.composer.canvasValues[key]) state.composer.fields[key] = fields[key];
+        state.composer.canvasValues[key] = fields[key];
+      }
+    }
+    scheduleSave();
+  }
   if (el.id === 'course-select') {
     const next = state.courses.find(c => c.id === el.value);
     if (isWeekly()) {
@@ -783,11 +901,12 @@ document.addEventListener('change', async event => {
       state.composer.recipientMode = 'all';
       if (!state.composer.fields.course_name || state.composer.fields.course_name === previous?.name) state.composer.fields.course_name = next.name;
       if (liveCourse(next) && state.composer.weeklyPlan) {
-        state.composer.weeklyPlan.courseIds = relatedCanvasCourses(state.courses, next);
+        state.composer.weeklyPlan.courseIds = academicCourse()?.subjectIds || [next.id];
+        state.composer.weeklyPlan.subjectSelection = 'all';
         state.composer.weeklyPlan.suppressed = [];
         applyCanvasPlan();
       }
-    } else freshComposer(next, template());
+    } else freshComposer(next, template(), state.composer.academicCourseId);
     scheduleSave(); render();
   }
   if (el.id === 'template-select') { chooseTemplate(el.value); scheduleSave(); render(); }
@@ -799,7 +918,10 @@ document.addEventListener('change', async event => {
     if (el.dataset.weeklySelect === 'course') {
       const nextSource = state.courses.find(c => c.id === el.value);
       const next = createWeeklyEntry(nextSource);
-      Object.assign(entry, next, { id: entry.id, teacher: entry.teacher, notes: entry.notes });
+      if (entry.sourceEventId && state.composer.weeklyPlan) state.composer.weeklyPlan.suppressed = [...new Set([...(state.composer.weeklyPlan.suppressed || []), entry.id])];
+      const notes = entry.notes;
+      for (const key of Object.keys(entry)) delete entry[key];
+      Object.assign(entry, next, { notes });
     } else if (el.dataset.weeklySelect === 'session') {
       const previous = createWeeklyEntry(source, entry.sessionId), next = createWeeklyEntry(source, el.value);
       const event = !entry.event || entry.event === previous.event ? next.event : entry.event;

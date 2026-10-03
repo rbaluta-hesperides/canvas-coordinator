@@ -20,3 +20,14 @@ export function reconcileCanvasRecipients(previous, incoming, selectedIds, mode)
   const selectedAll = mode === 'all' || (mode !== 'custom' && oldValid.length > 0 && oldValid.every(s => selection.has(s.id)));
   return freshValid.filter(s => selectedAll || selection.has(s.id)).map(s => s.id);
 }
+
+// Personal wording stays local; a timetable published by Canvas remains authoritative.
+export function refreshEditedCalendarSchedule(entry, fresh) {
+  if (!fresh || !entry.sourceEventId) return entry;
+  const updated = { ...entry };
+  for (const key of ['date', 'day', 'month', 'year', 'startTime', 'endTime', 'endDate', 'allDay', 'timeZone', 'scheduleSource', 'scheduleLabel', 'sortAt']) {
+    if (Object.prototype.hasOwnProperty.call(fresh, key)) updated[key] = fresh[key];
+  }
+  updated.calendarStale = false;
+  return updated;
+}

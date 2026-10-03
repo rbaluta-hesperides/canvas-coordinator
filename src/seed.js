@@ -5,6 +5,7 @@ export const VARIABLES = [
   { key: 'month', label: 'Mes', example: 'octubre' },
   { key: 'year', label: 'Año', example: '2026' },
   { key: 'time', label: 'Hora', example: '18:00' },
+  { key: 'end_time', label: 'Hora de fin', example: '19:00' },
   { key: 'session_name', label: 'Clase sincrónica', example: 'Clase sincrónica 1' },
   { key: 'preparation', label: 'Preparación previa', example: 'Hasta la sesión 2: El juicio moral.' },
   { key: 'coordinator_name', label: 'Nombre de coordinación', example: 'Alex García' },

@@ -1,4 +1,5 @@
 import { deriveSessions } from './domain.js';
+import { subjectName } from './academic.js';
 
 const text = (value) => value == null ? '' : String(value).replace(/\r\n?/g, '\n').trim();
 const sentence = (value) => /[.!?…][”"')\]]?$/.test(value) ? value : `${value}.`;
@@ -15,7 +16,7 @@ export function createWeeklyEntry(course = null, sessionId = '') {
     id: globalThis.crypto.randomUUID(),
     courseId: text(course?.id),
     sessionId: session?.id || '',
-    subject: text(course?.subject || course?.name),
+    subject: course ? subjectName(course) : '',
     event: text(session?.title),
     teacher: '',
     preparationMode: preparation ? 'canvas' : 'manual',
@@ -36,7 +37,7 @@ export function composeWeeklyAgenda(entries = []) {
     const subject = text(entry?.subject);
     const event = text(entry?.event);
     const teacher = text(entry?.teacher);
-    const notes = text(entry?.notes);
+    const notes = [text(entry?.scheduleLabel), text(entry?.notes)].filter(Boolean).join('\n');
     if (!subject) missing.push(`Entrada ${number}: falta la asignatura.`);
     if (!event) missing.push(`Entrada ${number}: falta la clase o actividad.`);
 
