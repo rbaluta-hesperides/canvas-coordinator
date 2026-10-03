@@ -91,8 +91,7 @@ test('weekly summary supports repeated subjects, explicit preparation, and priva
   await expect(entryField(live, 'preparation')).toHaveValue(/Sesión 4.*4\.3 Vídeo: Empleo y ciclo económico/);
   await expect(entrySelect(live, 'preparationMode')).toHaveValue('canvas');
   await entryField(live, 'event').fill('Clase de repaso');
-  // The absence of work is an explicit coordinator choice, never an inference
-  // made from the reference session or a missing preparation value.
+  // Choosing no preparation omits this part from the activity in the email.
   await entrySelect(live, 'preparationMode').selectOption('none');
   await field(page, 'general_notices').fill('Revisad las fechas de entrega en Canvas.');
   await selectTwoStudents(page);
@@ -106,7 +105,7 @@ test('weekly summary supports repeated subjects, explicit preparation, and priva
   expect(body).toContain('trabajo individual 3.6');
   expect(body).toContain('sesiones 1 a 14');
   expect(body).toContain('viernes 9 a las 20:00');
-  expect(body.match(/No hay sesiones adicionales que trabajar antes de esta clase\./g)).toHaveLength(2);
+  expect(body).not.toContain('No hay sesiones adicionales que trabajar antes de esta clase.');
   expect(body).not.toContain('Empleo y ciclo económico');
   expect(body).not.toContain('{{');
   await expect(gmailButton(page)).toBeEnabled();
@@ -132,14 +131,15 @@ test('weekly summary supports repeated subjects, explicit preparation, and priva
   await popup.close();
 });
 
-test('weekly validation blocks empty activities and preparation while optional notices stay optional', async ({ page }) => {
+test('weekly validation blocks unnamed activities while empty preparation and notices are omitted', async ({ page }) => {
   await openWeek(page);
   await expect(gmailButton(page)).toBeDisabled();
   const first = entries(page).first();
   await entryField(first, 'subject').fill('Economía Aplicada');
   await entryField(first, 'event').fill('Tutoría');
-  await expect(gmailButton(page)).toBeDisabled();
-  await expect(page.locator('#preview-validation')).toContainText('preparación');
+  await expect(gmailButton(page)).toBeEnabled();
+  await expect(page.locator('#email-body')).not.toContainText('{{preparacion');
+  await expect(page.locator('#email-body')).not.toContainText('No hay sesiones adicionales');
   await entrySelect(first, 'preparationMode').selectOption('none');
   await expect(gmailButton(page)).toBeEnabled();
   await expect(field(page, 'general_notices')).toHaveValue('');

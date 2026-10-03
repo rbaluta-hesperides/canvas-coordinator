@@ -1,6 +1,6 @@
 import { normalizeCourses, deriveSessions, parseStudentCsv, resolveTemplate, buildGmailUrl, isValidEmail } from './domain.js';
 import { createInitialState, createDemoCourses, weeklyTemplate, upgradeWorkspace, VARIABLES } from './seed.js';
-import { createWeeklyEntry, composeWeeklyAgenda, NO_ADDITIONAL_PREPARATION } from './weekly.js';
+import { createWeeklyEntry, composeWeeklyAgenda, withoutActivityLinks } from './weekly.js';
 import { nextCanvasWeek, canvasWeekFromInput, canvasWeekInput, shiftCanvasWeek, planCanvasWeek, dayInZone, validateWeekRange } from './canvas-planner.js';
 import { mergeCanvasCourse, reconcileCanvasRecipients, refreshEditedCalendarSchedule } from './canvas-workspace.js';
 import { academicCourses, academicCourseStudents, subjectsForAcademicCourse, subjectName } from './academic.js';
@@ -462,16 +462,17 @@ function weeklyComposerView() {
 function weeklyEntryView(entry, index) {
   const source = state.courses.find(c => c.id === entry.courseId);
   const sessions = source ? deriveSessions(source) : [];
+  const examPreparation = entry.preparationSource === 'exam';
   const valueField = (key, label, placeholder = '', area = false) => `<label class="field">${label}${area ? `<textarea data-weekly-field="${key}" data-entry="${esc(entry.id)}" rows="3" placeholder="${esc(placeholder)}">${esc(entry[key])}</textarea>` : `<input data-weekly-field="${key}" data-entry="${esc(entry.id)}" value="${esc(entry[key])}" placeholder="${esc(placeholder)}">`}</label>`;
   return `<article class="weekly-entry" data-entry-id="${esc(entry.id)}"><header><strong>Apartado ${index + 1}</strong><div>${button('move-weekly-entry', '', 'arrow', 'icon-button move-up', `data-id="${esc(entry.id)}" data-direction="-1" aria-label="Subir apartado ${index + 1}" ${index === 0 ? 'disabled' : ''}`)}${button('move-weekly-entry', '', 'arrow', 'icon-button move-down', `data-id="${esc(entry.id)}" data-direction="1" aria-label="Bajar apartado ${index + 1}" ${index === state.composer.weeklyEntries.length - 1 ? 'disabled' : ''}`)}${button('remove-weekly-entry', '', 'trash', 'icon-button', `data-id="${esc(entry.id)}" aria-label="Eliminar apartado ${index + 1}"`)}</div></header>
     ${entry.scheduleLabel ? `<p class="entry-schedule calendar-schedule">${icon('clock')}<span><strong>${entry.scheduleSource === 'calendar' ? 'Calendario de Canvas' : entry.scheduleSource === 'assignment' ? 'Entrega en Canvas' : 'Fecha del módulo'}</strong>${esc(entry.scheduleLabel)}</span></p>` : ''}
     <label class="field">Asignatura de origen<select data-weekly-select="course" data-entry="${esc(entry.id)}"><option value="">Introducir los datos manualmente</option>${options(academicCourse() ? subjectsForAcademicCourse(state.courses, academicCourse()) : state.courses, entry.courseId, subjectName)}</select></label>
     <div class="two-fields">${valueField('subject', 'Asignatura', 'Ej. Finanzas II')}${valueField('event', 'Clase, tutoría o examen', 'Ej. Tutoría 2')}</div>
     ${valueField('teacher', 'Profesor (opcional)', 'Nombre del profesor')}
-    ${source ? `<label class="field">Clase de referencia para la preparación<select data-weekly-select="session" data-entry="${esc(entry.id)}"><option value="">Sin clase de referencia</option>${options(sessions, entry.sessionId, s => s.title)}</select></label>` : ''}
-    <label class="field">Preparación<select data-weekly-select="preparationMode" data-entry="${esc(entry.id)}"><option value="manual" ${entry.preparationMode === 'manual' ? 'selected' : ''}>Indicar sesiones, tareas o temario</option><option value="canvas" ${entry.preparationMode === 'canvas' ? 'selected' : ''} ${!entry.sessionId ? 'disabled' : ''}>Hasta la sesión indicada por Canvas</option><option value="none" ${entry.preparationMode === 'none' ? 'selected' : ''}>No hay sesiones adicionales que trabajar</option></select></label>
-    ${entry.preparationMode === 'none' ? `<p class="weekly-none">${icon('check')}${esc(NO_ADDITIONAL_PREPARATION)}</p>` : valueField('preparation', 'Contenido que deben preparar', 'Ej. Trabajar las sesiones 1 a 3 y entregar el trabajo individual 3.6.', true)}
-    ${entry.sessionId ? `<div class="weekly-source"><p>${esc(entry.evidence || 'La preparación se ha indicado manualmente.')}</p>${button('refresh-weekly-entry', 'Actualizar desde Canvas', 'book', 'text-button', `data-id="${esc(entry.id)}"`)}</div>` : ''}
+    ${source && !examPreparation ? `<label class="field">Clase de referencia para la preparación<select data-weekly-select="session" data-entry="${esc(entry.id)}"><option value="">Sin clase de referencia</option>${options(sessions, entry.sessionId, s => s.title)}</select></label>` : ''}
+    <label class="field">Preparación<select data-weekly-select="preparationMode" data-entry="${esc(entry.id)}"><option value="manual" ${entry.preparationMode === 'manual' ? 'selected' : ''}>Indicar sesiones, tareas o temario</option><option value="canvas" ${entry.preparationMode === 'canvas' ? 'selected' : ''} ${!entry.sessionId && !examPreparation ? 'disabled' : ''}>${examPreparation ? 'Última sesión asíncrona antes del examen' : 'Hasta la sesión indicada por Canvas'}</option><option value="none" ${entry.preparationMode === 'none' ? 'selected' : ''}>Omitir preparación</option></select></label>
+    ${entry.preparationMode === 'none' ? '' : valueField('preparation', 'Contenido que deben preparar (opcional)', 'Ej. Trabajar las sesiones 1 a 3 y entregar el trabajo individual 3.6.', true)}
+    ${entry.sessionId || examPreparation ? `<div class="weekly-source"><p>${esc(entry.evidence || 'La preparación se ha indicado manualmente.')}</p>${button('refresh-weekly-entry', 'Actualizar desde Canvas', 'book', 'text-button', `data-id="${esc(entry.id)}"`)}</div>` : ''}
     ${valueField('notes', 'Indicaciones adicionales (opcional)', 'Entregas, fecha del examen, cambios o recordatorios.', true)}
   </article>`;
 }
@@ -526,15 +527,20 @@ function composerDateErrors() {
     ...dateErrors({ ...fields, day: fields.week_end_day, time: '' }),
   ])];
 }
+function currentWeeklyPreparation(entry) {
+  const source = state.courses.find(c => c.id === entry.courseId);
+  if (entry.preparationSource === 'exam') return calendarEntries(source).find(item => item.sourceEventId === entry.sourceEventId) || { preparation: '', evidence: '' };
+  return createWeeklyEntry(source, entry.sessionId);
+}
 function weeklyErrors() {
   const entries = state.composer.weeklyEntries || [];
   const errors = composeWeeklyAgenda(entries).missing;
   entries.forEach((entry, index) => {
     if (entry.calendarStale) errors.push(`Apartado ${index + 1}: la actividad ya no aparece en el calendario del periodo. Revísala antes de abrir Gmail.`);
-    if (entry.preparationMode !== 'canvas') return;
+    if (entry.preparationMode !== 'canvas' || !withoutActivityLinks(entry.preparation)) return;
     const source = state.courses.find(c => c.id === entry.courseId);
-    const current = createWeeklyEntry(source, entry.sessionId);
-    if (!source || !current.sessionId || !current.preparation) errors.push(`Apartado ${index + 1}: no hay una preparación de Canvas disponible. Indícala manualmente o elige otra clase.`);
+    const current = currentWeeklyPreparation(entry);
+    if (!source || !current.preparation) errors.push(`Apartado ${index + 1}: no hay una preparación de Canvas disponible. Indícala manualmente o elige otra clase.`);
     else if (source.preparationComplete === false) errors.push(`Apartado ${index + 1}: no se pudo actualizar toda la preparación de Canvas. Vuelve a sincronizar o revisa las indicaciones antes de elegir la preparación manual.`);
     else if (current.preparation !== entry.preparation) errors.push(`Apartado ${index + 1}: la estructura de Canvas ha cambiado. Pulsa «Actualizar desde Canvas» o revisa la preparación manualmente.`);
   });
@@ -766,10 +772,8 @@ const actions = {
   },
   'refresh-weekly-entry'(el) {
     const entry = state.composer.weeklyEntries.find(e => e.id === el.dataset.id);
-    const source = state.courses.find(c => c.id === entry.courseId);
-    const next = createWeeklyEntry(source, entry.sessionId);
-    if (!next.sessionId || !next.preparation) throw new Error('No se ha encontrado preparación para esta clase. Indícala manualmente.');
-    Object.assign(entry, { preparation: next.preparation, preparationMode: 'canvas', evidence: next.evidence }); scheduleSave(); render();
+    const next = currentWeeklyPreparation(entry);
+    Object.assign(entry, { preparation: next.preparation || '', preparationMode: next.preparation ? 'canvas' : 'none', evidence: next.evidence || '' }); scheduleSave(); render();
   },
   'show-structure'(el) { structureModal(el.dataset.id); },
   recipients: recipientsModal,
@@ -963,7 +967,7 @@ document.addEventListener('change', async event => {
       Object.assign(entry, { sessionId: next.sessionId, event, preparation: next.preparation, preparationMode: next.preparationMode, evidence: next.evidence });
     } else if (el.dataset.weeklySelect === 'preparationMode') {
       entry.preparationMode = el.value;
-      if (el.value === 'canvas') { const next = createWeeklyEntry(source, entry.sessionId); entry.preparation = next.preparation; entry.evidence = next.evidence; }
+      if (el.value === 'canvas') { const next = currentWeeklyPreparation(entry); entry.preparation = next.preparation || ''; entry.evidence = next.evidence || ''; }
     }
     scheduleSave(); render();
   }

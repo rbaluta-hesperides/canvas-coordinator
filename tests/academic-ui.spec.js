@@ -9,7 +9,7 @@ const courseId = id => `canvas:${baseUrl}:${user.id}:${id}`;
 const person = (id, email = `${id}@example.edu`) => ({ id, name: id, email });
 const localHour = date => new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(date));
 
-function academicSubjects(range, { completeWeek = false } = {}) {
+function academicSubjects(range, { completeWeek = false, examWeek = false } = {}) {
   const definitions = [
     { id: 'finance', name: 'Finanzas II', semester: 'S5', students: [person('ana'), person('alicia')], hour: 16 },
     { id: 'metrics', name: 'Econometría', semester: 'S5', students: [person('ana-other-id', 'ana@example.edu'), person('bruno')], hour: 18, tutorial: true },
@@ -51,6 +51,25 @@ function academicSubjects(range, { completeWeek = false } = {}) {
         startAt: `${dayAfter(5)}T10:00:00.000Z`, endAt: `${dayAfter(5)}T11:30:00.000Z`, description: '' });
       result.assignments.push({ id: 'finance-deadline', title: 'Caso práctico de valoración', dueAt: `${dayAfter(6)}T20:00:00.000Z`,
         description: '<p>Entregar el caso de valoración con los cálculos justificados.</p>', url: `${baseUrl}/courses/finance/assignments/deadline` });
+    }
+    if (examWeek && subject.id === 'finance') {
+      result.modules = [
+        { id: 'finance-session-14', name: 'Sesión 14 | Repaso y aplicaciones', position: 1, items: [
+          { id: 'finance-video-14', title: '14.2 Vídeo: Valoración final', type: 'Page', position: 1,
+            url: 'https://vimeo.com/123456789' },
+        ] },
+        { id: 'finance-exam', name: 'Examen final', position: 2, items: [] },
+        { id: 'finance-session-15', name: 'Sesión 15 | Contenido posterior al examen', position: 3, items: [
+          { id: 'finance-video-15', title: '15.1 Vídeo: Ampliación posterior', type: 'Page', position: 1 },
+        ] },
+      ];
+      result.calendarEvents[0] = { ...result.calendarEvents[0], title: 'Examen final',
+        description: '<p>Convocatoria ordinaria.</p><p><a href="https://canvas.example.edu/courses/finance">Abrir en Canvas</a></p><p>https://vimeo.com/123456789</p>',
+        url: `${baseUrl}/courses/finance/calendar` };
+    }
+    if (examWeek && subject.id === 'metrics') {
+      result.calendarEvents[0].description = '';
+      result.calendarEvents[0].url = `${baseUrl}/courses/metrics/calendar`;
     }
     return result;
   });
@@ -200,6 +219,41 @@ test('third year contains its subjects and calendar timetable, with the deduplic
   expect(url.searchParams.get('bcc').split(',').sort()).toEqual(['alicia@example.edu', 'ana@example.edu', 'bruno@example.edu']);
   expect(url.searchParams.has('cc')).toBeFalsy();
   expect(url.searchParams.get('body')).toContain(hours);
+  await popup.close();
+});
+
+test('exam preparation stops at the preceding async session and activities without preparation omit it from the complete draft', async ({ page, context }) => {
+  const model = await connectAcademicCanvas(page, { examWeek: true });
+  await page.locator('#week-select').fill('2026-W41');
+  await expect.poll(() => model.ranges.at(-1)).toEqual({ startDate: '2026-10-05', endDate: '2026-10-11' });
+  await expect(page.locator('[data-action="canvas-sync"]')).toBeEnabled();
+  await expect(page.locator('#weekly-customization')).toHaveJSProperty('open', false);
+  await expect(page.locator('#weekly-entries .weekly-entry')).toHaveCount(2);
+  const body = await page.locator('#email-body').textContent();
+  expect(body).toContain('Examen final');
+  expect(body).toContain('Trabajar hasta Sesión 14 | Repaso y aplicaciones.');
+  expect(body).not.toContain('Sesión 15');
+  expect(body).not.toContain('Ampliación posterior');
+  expect(body).toContain('Tutoría de Econometría');
+  expect(body).toContain('18:00–19:30');
+  expect(body).toContain('20:00–21:30');
+  expect(body).not.toMatch(/https?:\/\/|www\.|\{\{|No hay sesiones|Sin trabajo adicional/i);
+  expect(body).not.toContain('Abrir en Canvas');
+  const tutorialParagraph = body.split('\n\n').find(paragraph => paragraph.includes('Tutoría de Econometría'));
+  expect(tutorialParagraph).toBeTruthy();
+  expect(tutorialParagraph).not.toMatch(/preparaci[oó]n|trabajar|repasar|sin trabajo|no hay/i);
+  await expect(page.locator('[data-action="gmail"]')).toBeEnabled();
+  await page.screenshot({ path: test.info().outputPath('exam-week-clean-draft.png'), fullPage: true });
+
+  const handoffPromise = context.waitForEvent('request', { predicate: request => request.url().startsWith('https://mail.google.com/') });
+  const popupPromise = page.waitForEvent('popup');
+  await page.locator('[data-action="gmail"]').click();
+  const [handoff, popup] = await Promise.all([handoffPromise, popupPromise]);
+  const url = new URL(handoff.url());
+  expect(url.searchParams.get('body')).toBe(body);
+  expect(url.searchParams.get('to')).toBe(user.email);
+  expect(url.searchParams.get('bcc').split(',').sort()).toEqual(['alicia@example.edu', 'ana@example.edu', 'bruno@example.edu']);
+  expect(url.searchParams.has('cc')).toBeFalsy();
   await popup.close();
 });
 

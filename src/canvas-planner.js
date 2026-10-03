@@ -1,4 +1,4 @@
-import { deriveSessions } from './domain.js';
+import { deriveSessions, deriveExamPreparation, isExamActivity } from './domain.js';
 import { createWeeklyEntry } from './weekly.js';
 
 const fold = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -72,7 +72,7 @@ const classNumber = title => {
   const value = /\b(?:clase|sesion|class|session|lecture)(?:\s+(?:sincronic[ao]|sincron[ao]|en directo|en vivo|synchronous|live))?\s*(?:n[º°.]?\s*)?(\d+)\b/.exec(fold(title))?.[1];
   return value == null ? '' : String(Number(value));
 };
-const exam = title => /\b(?:examen|parcial|exam|quiz|evaluacion)\b/.test(fold(title));
+const exam = isExamActivity;
 const tutorial = title => /\b(?:tutoria|tutoring)\b/.test(fold(title));
 const notAClass = event => event.type === 'assignment' || exam(event.title) || tutorial(event.title) ||
   /\b(?:entrega|tarea|plazo|vencimiento|cancelad[ao]s?|suspendid[ao]s?|reunion|meeting|deadline|assignment|recording|grabacion|foro|discussion|asincron[ao]s?|asincronic[ao]s?|asynchronous)\b|\b(?:fecha limite|office hours)\b/.test(fold(event.title));
@@ -166,16 +166,22 @@ export function planCanvasWeek(courses, { startDate, endDate, timeZone = 'Europe
       Object.assign(item, fallback ? moduleSchedule(session, timeZone) : calendarSchedule(event, timeZone));
       item.event = event.title || session?.title || 'Actividad de Canvas';
       item.teacher = (course.teachers || []).length === 1 ? (typeof course.teachers[0] === 'string' ? course.teachers[0] : course.teachers[0].name || '') : '';
-      if (!session) {
-        // Exam coverage and tutoring instructions come only from the event itself.
+      if (exam(event.title)) {
+        const preparation = deriveExamPreparation(course, event, { timeZone });
+        item.preparationSource = 'exam';
+        item.preparation = preparation ? `Trabajar hasta ${preparation.preparation.replace(/[.!?]+$/, '')}.` : '';
+        item.preparationMode = preparation ? 'canvas' : 'none';
+        item.preparationReferenceId = preparation?.referenceId || '';
+        item.preparationModuleId = preparation?.moduleId || '';
+        item.evidence = preparation?.evidence || 'No se identificó una sesión asíncrona anterior al examen en Canvas.';
+      } else if (!session) {
         item.preparation = description;
-        item.preparationMode = 'manual';
+        item.preparationMode = description ? 'manual' : 'none';
         item.evidence = description ? 'Indicaciones publicadas en el calendario de Canvas.' : 'Canvas no publica la preparación de esta actividad.';
-        if (!description) warnings.push(`${course.subject || course.name}: Canvas no indica la preparación de «${item.event}». Revísala antes de abrir Gmail.`);
       }
-      if (session && stalePreparation) item.evidence = `Preparación pendiente de actualizar; puede proceder de la última copia local. ${item.evidence}`;
+      if ((session || item.preparationSource === 'exam') && stalePreparation) item.evidence = `Preparación pendiente de actualizar; puede proceder de la última copia local. ${item.evidence}`;
       if (!fallback && course.syncStatus?.calendar === 'error') item.evidence = `Calendario de la última copia local, pendiente de actualizar. ${item.evidence}`;
-      item.notes = [session && description ? description : '', /^https:\/\//.test(event.url || '') ? event.url : ''].filter(Boolean).join('\n\n');
+      item.notes = !exam(event.title) && session && description ? description : '';
       item.sortAt = fallback ? `${sessionDay(session)}T${session.time || '12:00'}:00` : event.allDay ? `${eventDay(event, timeZone)}T00:00:00` : localSortTime(event.startAt, timeZone);
       entries.push(item);
       if (session) usedSessions.add(session.id);
@@ -199,10 +205,15 @@ export function planCanvasWeek(courses, { startDate, endDate, timeZone = 'Europe
       const deadlineLabel = assignment.differentiated ? `Fecha publicada para ${assignment.dueScope || 'los destinatarios indicados en Canvas'}` : 'Fecha límite';
       const schedule = calendarSchedule({ startAt: assignment.dueAt }, timeZone, 'assignment');
       schedule.scheduleLabel = `${deadlineLabel}: ${schedule.scheduleLabel}`;
+      const isExam = exam(assignment.title);
+      const examPreparation = isExam ? deriveExamPreparation(course, { ...assignment, type: 'assignment' }, { timeZone }) : null;
       if (assignment.differentiated) warnings.push(`${course.subject || course.name}: «${assignment.title}» tiene fechas o destinatarios específicos; cada estudiante debe comprobar en Canvas la fecha que le corresponde.`);
       entries.push({ ...createWeeklyEntry(course), ...schedule, id: `canvas-assignment:${course.id}:${assignment.id}`, sourceEventId: `assignment-${assignment.id}`, generated: true,
-        event: `Entrega: ${assignment.title}`, preparationMode: 'manual', preparation: description || 'Completar y entregar la actividad en Canvas.',
-        notes: [assignment.differentiated ? 'Comprueba en Canvas la fecha que te corresponde.' : '', /^https:\/\//.test(assignment.url || '') ? assignment.url : ''].filter(Boolean).join('\n'), evidence: course.syncStatus?.assignments === 'error' ? 'Fecha de entrega e instrucciones de la última copia local; pendientes de actualizar en Canvas.' : 'Fecha de entrega e instrucciones de la actividad en Canvas.', sortAt: localSortTime(assignment.dueAt, timeZone) });
+        event: isExam ? assignment.title : `Entrega: ${assignment.title}`,
+        preparationMode: isExam ? examPreparation ? 'canvas' : 'none' : description ? 'manual' : 'none',
+        preparation: isExam ? examPreparation ? `Trabajar hasta ${examPreparation.preparation.replace(/[.!?]+$/, '')}.` : '' : description,
+        ...(isExam ? { preparationSource: 'exam', preparationReferenceId: examPreparation?.referenceId || '', preparationModuleId: examPreparation?.moduleId || '', assignmentId: assignment.canvasAssignmentId || assignment.id } : {}),
+        notes: assignment.differentiated ? 'Comprueba en Canvas la fecha que te corresponde.' : '', evidence: isExam ? `${stalePreparation ? 'Preparación pendiente de actualizar; puede proceder de la última copia local. ' : ''}${examPreparation?.evidence || 'No se identificó una sesión asíncrona anterior al examen en Canvas.'}` : course.syncStatus?.assignments === 'error' ? 'Fecha de entrega e instrucciones de la última copia local; pendientes de actualizar en Canvas.' : 'Fecha de entrega e instrucciones de la actividad en Canvas.', sortAt: localSortTime(assignment.dueAt, timeZone) });
     }
   }
   entries.sort((a, b) => String(a.sortAt).localeCompare(String(b.sortAt)) || a.id.localeCompare(b.id));

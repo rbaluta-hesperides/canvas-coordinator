@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeCourses, deriveSessions, parseStudentCsv, resolveTemplate, buildGmailUrl, isValidEmail } from '../src/domain.js';
+import { normalizeCourses, deriveSessions, deriveExamPreparation, isExamActivity, parseStudentCsv, resolveTemplate, buildGmailUrl, isValidEmail } from '../src/domain.js';
 
 const item = (id, title, position = 1, extra = {}) => ({ id, title, type: 'Page', position, ...extra });
 const module = (id, name, position, items = [], extra = {}) => ({ id, name, position, items, ...extra });
@@ -155,6 +155,93 @@ test('invalid imported ISO times are not presented as a valid class time', () =>
   const [session] = deriveSessions({ modules: [module('live', 'Clase sincrónica 1', 1, [], { date: '2026-10-03T99:99:00Z' })] });
   assert.equal(session.day, '03');
   assert.equal(session.time, '');
+});
+
+test('exam preparation stops at the last asynchronous session before its decorated module marker', () => {
+  const course = { modules: [
+    module('later', 'Sesión 15', 6),
+    module('exam', '🟡 Examen parcial [08/10/2026]', 5),
+    module('lesson', 'Sesión 14 | Repaso para el examen', 1, [item('video', '14.2 Vídeo: Último material')]),
+    module('live', '⚪ Sesión 15', 2),
+    module('resource', 'Recursos', 3, [item('policy', 'Normas del examen')]),
+    module('hidden', 'Sesión 99', 4, [], { published: false }),
+  ] };
+  const before = JSON.stringify(course);
+  const result = deriveExamPreparation(course, { title: 'Finanzas II — Examen parcial', startAt: '2026-10-08T15:00:00Z' });
+  assert.equal(result.preparation, 'Sesión 14 | Repaso para el examen');
+  assert.equal(result.moduleId, 'lesson'); assert.equal(result.referenceId, 'exam');
+  assert.match(result.evidence, /última sesión asíncrona/);
+  assert.doesNotMatch(result.preparation, /15|99|Último material/);
+  assert.equal(JSON.stringify(course), before);
+});
+
+test('partial and final exam boundaries retain their own preceding asynchronous sessions', () => {
+  const course = { modules: [module('first', 'Sesión 4', 1), module('partial', 'Examen parcial', 2),
+    module('second', 'Sesión 14', 3), module('final', 'Examen final', 4), module('after', 'Sesión 15', 5)] };
+  assert.equal(deriveExamPreparation(course, { title: 'Examen parcial' }).moduleId, 'first');
+  assert.equal(deriveExamPreparation(course, { title: 'Examen final' }).moduleId, 'second');
+  assert.equal(deriveExamPreparation(course, { title: 'Examen extraordinario' }), null);
+  assert.equal(deriveExamPreparation({ modules: [module('exam', 'Examen final', 1), module('later', 'Sesión 1', 2)] }, { title: 'Examen final' }), null);
+});
+
+test('exam assignment identity survives normalization and stops inside the exact module item', () => {
+  const [course] = normalizeCourses([{ id: 'exam-course', modules: [module('previous', 'Sesión 13', 1),
+    module('inside', 'Sesión 14', 2, [item('material', '14.1 Vídeo: Caso de estudio', 1),
+      item('exam-item', 'Evaluación de conocimientos', 2, { type: 'Assignment', content_id: '40000000000000002' }),
+      item('post-exam', 'Material posterior al examen', 3)]), module('later', 'Sesión 15', 3)] }]);
+  const event = { title: 'Examen final', type: 'assignment', id: '40000000000000002:override-17', canvasAssignmentId: '40000000000000002' };
+  assert.equal(course.modules[1].items[1].contentId, '40000000000000002');
+  assert.equal(deriveExamPreparation(course, event).preparation, 'Sesión 14');
+  assert.equal(deriveExamPreparation(course, event).referenceId, 'inside:exam-item');
+  course.modules[1].items[1].position = 0;
+  assert.equal(deriveExamPreparation(course, event).preparation, 'Sesión 13', 'an exam at the beginning cannot include later material in its module');
+});
+
+test('exam quiz and explicit module-item identities do not confuse different Canvas ID namespaces', () => {
+  const course = { modules: [module('lesson', 'Sesión 7', 1), module('evaluation', 'Evaluaciones', 2,
+    [item('module-item', 'Prueba A', 1, { type: 'Quiz', content_id: '88' })]), module('after', 'Sesión 8', 3)] };
+  assert.equal(deriveExamPreparation(course, { title: 'Examen final', quizId: '88' }).preparation, 'Sesión 7');
+  assert.equal(deriveExamPreparation(course, { title: 'Examen final', moduleItemId: 'module-item' }).preparation, 'Sesión 7');
+  assert.equal(deriveExamPreparation(course, { title: 'Examen final', assignmentId: '88' }), null);
+});
+
+test('ambiguous or absent exam markers never select the last course lesson by assumption', () => {
+  const course = { modules: [module('first', 'Sesión 2', 1), module('exam-one', 'Examen final', 2),
+    module('next', 'Sesión 5', 3), module('exam-two', 'Examen final', 4)] };
+  assert.equal(deriveExamPreparation(course, { title: 'Examen final' }), null);
+  assert.equal(deriveExamPreparation({ modules: [module('last', 'Sesión 99', 1)] }, { title: 'Examen final', startAt: '2026-10-08T18:00:00Z' }), null);
+  assert.equal(isExamActivity('Clase de repaso para el examen'), false);
+  assert.equal(isExamActivity('Tutoría sobre el examen final'), false);
+  assert.equal(isExamActivity('Finanzas II — Examen final'), true);
+});
+
+test('calendar-only exams use explicit earlier asynchronous dates and reject ambiguous ordering', () => {
+  const course = { modules: [module('before', 'Sesión 14', 1, [], { date: '2026-10-07' }),
+    module('same-day', 'Sesión 15', 2, [], { date: '2026-10-08' }), module('after', 'Sesión 16', 3, [], { date: '2026-10-09' }),
+    module('undated', 'Sesión 99', 4)] };
+  const event = { title: 'Examen final', startAt: '2026-10-08T18:00:00Z' };
+  const result = deriveExamPreparation(course, event);
+  assert.equal(result.preparation, 'Sesión 14'); assert.equal(result.referenceId, 'exam-date:2026-10-08');
+  course.modules[2].date = '2026-10-06';
+  assert.equal(deriveExamPreparation(course, event), null, 'contradictory dated module order is not a reliable cutoff');
+  assert.equal(deriveExamPreparation(course, { title: 'Examen final', allDay: true, day: '2026-02-30' }), null);
+});
+
+test('dated exam fallback uses coordinator-local days across UTC midnight', () => {
+  const course = { modules: [module('before', 'Sesión 1', 1, [], { date: '2026-10-03' }),
+    module('next-day', 'Sesión 2', 2, [], { date: '2026-10-04T23:30:00Z' })] };
+  const event = { title: 'Examen final', startAt: '2026-10-05T08:00:00Z' };
+  assert.equal(deriveExamPreparation(course, event, { timeZone: 'Europe/Madrid' }).preparation, 'Sesión 1');
+  assert.equal(deriveExamPreparation(course, event, { timeZone: 'UTC' }).preparation, 'Sesión 2');
+});
+
+test('an undated asynchronous session after the dated candidate makes the exam cutoff unknown', () => {
+  const event = { title: 'Examen final', startAt: '2026-10-08T18:00:00Z' };
+  const course = { modules: [module('before', 'Sesión 13', 1, [], { date: '2026-10-07' }),
+    module('uncertain', 'Sesión 14', 2), module('after', 'Sesión 15', 3, [], { date: '2026-10-09' })] };
+  assert.equal(deriveExamPreparation(course, event), null);
+  course.modules.pop();
+  assert.equal(deriveExamPreparation(course, event), null, 'an undated tail also prevents claiming the last session before the exam');
 });
 
 test('CSV accepts BOM, Spanish headers, quoted semicolons, escaped quotes, multiline names and deduplicates', () => {

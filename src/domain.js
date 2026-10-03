@@ -51,6 +51,7 @@ function normalizeModules(values) {
       url: string(item.url || item.html_url || item.htmlUrl || item.external_url), published: item.published !== false,
       pageUrl: string(item.pageUrl || item.page_url), body: string(item.body),
       date: string(item.date || item.startAt || item.start_at), time: string(item.time),
+      ...(item.contentId != null || item.content_id != null ? { contentId: string(item.contentId ?? item.content_id) } : {}),
     })),
   }));
 }
@@ -196,6 +197,96 @@ export function deriveSessions(course) {
     }
   }
   return sessions;
+}
+
+const examWords = /\b(?:examen(?:es)?|parcial(?:es)?|exam(?:ination)?|quiz|evaluacion)\b/;
+function examLabel(value) {
+  const title = fold(value).replace(/^[^\p{L}\p{N}]+/u, '').replace(/\s+/g, ' ');
+  const marker = examWords.exec(title);
+  if (!marker || marker.index > 0 && !/[|:;–—-]\s*$/.test(title.slice(0, marker.index))) return '';
+  return title.slice(marker.index)
+    .replace(/\[?\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/.]\d{1,2}[/.]\d{4})\b\]?/g, '')
+    .replace(/[\s|:;–—-]+(?:convocatoria del|opcion del?|alternativa del?)\s+(?:lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b.*$/, '')
+    .replace(/[\s|:;–—-]+$/, '').replace(/\s+/g, ' ').trim();
+}
+function examResource(value) {
+  const match = /\/(assignments|quizzes)\/([^/?#]+)/.exec(string(value));
+  return match ? `${match[1]}:${match[2]}` : '';
+}
+export const isExamActivity = value => Boolean(examLabel(value));
+
+/** Last asynchronous session before an exam's structural position, never a later lesson. */
+export function deriveExamPreparation(course, event, { timeZone = 'Europe/Vienna' } = {}) {
+  if (!examLabel(event?.title || event?.name)) return null;
+  const modules = normalizeModules(course?.modules).filter(module => module.published !== false);
+  const asynchronous = module => isLessonModule(module.name) && !isLive(module.name, true) && !isAdministrative(module.name) && !examLabel(module.name) &&
+    !module.items.some(item => item.published !== false && /\b(?:antes|despues) de la clase\s+\d+\b/.test(fold(item.title)));
+  const nodes = modules.flatMap((module, moduleIndex) => [
+    { module, moduleIndex, item: null, title: module.name },
+    ...module.items.filter(item => item.published !== false).map(item => ({ module, moduleIndex, item, title: item.title })),
+  ]);
+  const moduleItemId = string(event?.moduleItemId || event?.module_item_id);
+  const moduleId = string(event?.moduleId || event?.module_id);
+  const assignmentId = string(event?.canvasAssignmentId || event?.assignmentId || event?.assignment_id ||
+    (event?.type === 'assignment' ? event.id : '')).replace(/^assignment[_-]/, '').replace(/:(?:base|override-.*)$/, '');
+  const quizId = string(event?.quizId || event?.quiz_id);
+  const resource = examResource(event?.url || event?.html_url);
+  let targets = nodes.filter(node => node.item && (
+    moduleItemId && node.item.id === moduleItemId ||
+    assignmentId && fold(node.item.type) === 'assignment' && node.item.contentId === assignmentId ||
+    quizId && fold(node.item.type) === 'quiz' && node.item.contentId === quizId ||
+    resource && examResource(node.item.url) === resource
+  ));
+  if (!targets.length && moduleId) targets = nodes.filter(node => !node.item && node.module.id === moduleId);
+  if (!targets.length) {
+    const title = examLabel(event.title || event.name);
+    targets = nodes.filter(node => examLabel(node.title) === title);
+    // A module and its same-named exam item identify one boundary at the module start.
+    targets = targets.filter(node => !node.item || !targets.some(candidate => candidate.moduleIndex === node.moduleIndex && !candidate.item));
+  }
+  if (targets.length > 1) return null;
+  if (targets.length === 1) {
+    const target = targets[0];
+    const earlier = modules.filter((module, index) => index < target.moduleIndex && asynchronous(module));
+    // An exam embedded in a session follows that session only when there is actual
+    // asynchronous material before the exam item; an exam at item 1 does not count it.
+    if (target.item && asynchronous(target.module)) {
+      const itemIndex = target.module.items.findIndex(item => item.id === target.item.id);
+      if (target.module.items.slice(0, itemIndex).some(item => isMaterial(item) && !examLabel(item.title))) earlier.push(target.module);
+    }
+    const last = earlier.at(-1);
+    return last ? { preparation: last.name, moduleId: last.id, referenceId: target.item ? `${target.module.id}:${target.item.id}` : target.module.id,
+      evidence: `Según el orden de Canvas, la última sesión asíncrona anterior a «${target.title}» es «${last.name}».` } : null;
+  }
+  // With no matching structural marker, only explicit dated asynchronous sessions
+  // prove precedence. Undated modules and same-day sessions do not provide that proof.
+  let examDay = event?.allDay ? string(event.day) : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(examDay)) {
+    const timestamp = event?.startAt || event?.start_at || event?.dueAt || event?.due_at;
+    if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return null;
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(timestamp)).map(part => [part.type, part.value]));
+    examDay = `${parts.year}-${parts.month}-${parts.day}`;
+  }
+  const parsedExamDay = new Date(`${examDay}T12:00:00Z`);
+  if (!Number.isFinite(parsedExamDay.getTime()) || parsedExamDay.toISOString().slice(0, 10) !== examDay) return null;
+  const lessons = modules.filter(asynchronous).map((module, index) => {
+    const parts = dateParts([module.date, module.name]);
+    let day = parts.year ? `${parts.year}-${parts.month}-${parts.day}` : '';
+    if (/T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(module.date) && Number.isFinite(Date.parse(module.date))) {
+      const local = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(module.date)).map(part => [part.type, part.value]));
+      day = `${local.year}-${local.month}-${local.day}`;
+    }
+    return { module, day, index };
+  });
+  const dated = lessons.filter(entry => entry.day);
+  if (dated.some((entry, index) => index > 0 && entry.day < dated[index - 1].day)) return null;
+  const last = dated.filter(entry => entry.day < examDay).at(-1);
+  if (last) {
+    const boundary = dated.find(entry => entry.index > last.index && entry.day >= examDay)?.index ?? lessons.length;
+    if (lessons.some(entry => entry.index > last.index && entry.index < boundary && !entry.day)) return null;
+  }
+  return last ? { preparation: last.module.name, moduleId: last.module.id, referenceId: `exam-date:${examDay}`,
+    evidence: `La sesión asíncrona «${last.module.name}» tiene fecha ${last.day}, anterior al examen del ${examDay}, en el orden de Canvas.` } : null;
 }
 
 function csvRows(text, delimiter) {

@@ -89,14 +89,49 @@ test('no new material is inferred only when two known live-class cutoffs match',
   const entry = planCanvasWeek([course], range).entries[0];
   assert.equal(entry.preparationMode, 'manual'); assert.equal(entry.preparation, '');
 });
-test('exams and tutoring do not inherit a numbered live class preparation', () => {
+test('exams without a structural boundary omit preparation while tutoring may use published instructions', () => {
   const course = fixture(); course.calendarEvents[0].title = 'Examen parcial 1'; course.calendarEvents[0].description = '';
   const plan = planCanvasWeek([course], range);
-  assert.equal(plan.entries[0].sessionId, ''); assert.equal(plan.entries[0].preparation, ''); assert.equal(plan.warnings.length, 1);
+  assert.equal(plan.entries[0].sessionId, ''); assert.equal(plan.entries[0].preparation, ''); assert.equal(plan.warnings.length, 0);
+  assert.equal(plan.entries[0].preparationSource, 'exam'); assert.equal(plan.entries[0].preparationMode, 'none');
   course.calendarEvents[0].description = '<p>Sesiones 1 a 14.</p>';
-  assert.equal(planCanvasWeek([course], range).entries[0].preparation, 'Sesiones 1 a 14.');
+  assert.equal(planCanvasWeek([course], range).entries[0].preparation, '');
   course.calendarEvents[0].title = 'Tutoría 1';
   assert.equal(planCanvasWeek([course], range).entries[0].sessionId, '');
+  assert.equal(planCanvasWeek([course], range).entries[0].preparation, 'Sesiones 1 a 14.');
+});
+
+test('calendar and assignment exams derive their last asynchronous session without descriptions or links', () => {
+  const course = fixture();
+  course.modules = [
+    { id: 's14', name: 'Sesión 14', position: 1, items: [] },
+    { id: 'final', name: 'Examen final', position: 2, items: [{ id: 'exam-item', title: 'Evaluación final', type: 'Assignment', content_id: '99' }] },
+    { id: 's15', name: 'Sesión 15', position: 3, items: [] },
+  ];
+  course.calendarEvents[0].title = 'Examen final';
+  course.calendarEvents[0].description = '<p>Sesión 99 <a href="https://canvas.example.com/exam">Abrir en Canvas</a></p>';
+  course.calendarEvents[0].url = 'https://canvas.example.com/event';
+  course.assignments = [{ id: '99', title: 'Examen final', dueAt: '2026-10-09T16:00:00Z', description: 'No usar estas instrucciones como corte de sesiones.', url: 'https://canvas.example.com/assignment' }];
+  const { entries } = planCanvasWeek([course], range);
+  assert.equal(entries.length, 2);
+  for (const entry of entries) {
+    assert.equal(entry.preparation, 'Trabajar hasta Sesión 14.');
+    assert.equal(entry.preparationSource, 'exam'); assert.equal(entry.preparationMode, 'canvas');
+    assert.equal(entry.preparationModuleId, 's14'); assert.equal(entry.sessionId, '');
+    assert.equal(entry.notes, ''); assert.doesNotMatch(JSON.stringify(entry), /https:|Sesión 99|Sesión 15/);
+  }
+});
+
+test('blank activities and assignments have no invented work or automatic source URL', () => {
+  const course = fixture();
+  course.calendarEvents[0] = { ...course.calendarEvents[0], title: 'Tutoría de dudas', description: '', url: 'https://canvas.example.com/calendar' };
+  course.assignments = [{ id: 'blank', title: 'Actividad', dueAt: '2026-10-09T16:00:00Z', description: '', url: 'https://canvas.example.com/assignment' }];
+  const { entries, warnings } = planCanvasWeek([course], range);
+  assert.equal(warnings.length, 0);
+  for (const entry of entries) {
+    assert.equal(entry.preparation, ''); assert.equal(entry.preparationMode, 'none'); assert.equal(entry.notes, '');
+    assert.doesNotMatch(JSON.stringify(entry), /https:|Completar y entregar/);
+  }
 });
 
 test('an exact tutorial title may identify a proven synchronous module without assuming its class number', () => {

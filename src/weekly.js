@@ -4,6 +4,16 @@ import { subjectName } from './academic.js';
 const text = (value) => value == null ? '' : String(value).replace(/\r\n?/g, '\n').trim();
 const sentence = (value) => /[.!?…][”"')\]]?$/.test(value) ? value : `${value}.`;
 
+// Keep useful wording while excluding links from generated activity paragraphs,
+// including URLs retained by drafts created before links were removed from the planner.
+export function withoutActivityLinks(value) {
+  return text(value)
+    .replace(/\[([^\]]+)\]\((?:https?:\/\/|www\.)[^\s)]+\)/gi, '$1')
+    .replace(/\b(?:https?:\/\/|www\.)[^\s<>"']+/gi, '')
+    .split('\n').map(line => /^(?:(?:enlace|link|url)\s*:?\s*)?[.:;,–—-]*$/i.test(line.trim()) ? '' : line.trimEnd())
+    .join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function calendarDateKey(entry) {
   if (entry?.generated !== true && !text(entry?.sourceEventId)) return '';
   const value = text(entry.sortAt) || `${text(entry.date)}T${entry.allDay ? '00:00' : text(entry.startTime) || '12:00'}:00`;
@@ -11,8 +21,6 @@ function calendarDateKey(entry) {
   const day = value.slice(0, 10), parsed = new Date(`${day}T12:00:00Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day ? value : '';
 }
-
-export const NO_ADDITIONAL_PREPARATION = 'No hay sesiones adicionales que trabajar antes de esta clase.';
 
 /** A weekly item is independent, even when several items belong to the same course. */
 export function createWeeklyEntry(course = null, sessionId = '') {
@@ -52,24 +60,23 @@ export function composeWeeklyAgenda(entries = []) {
     const event = text(entry?.event);
     const teacher = text(entry?.teacher);
     const schedule = text(entry?.scheduleLabel);
-    const notes = text(entry?.notes);
+    const notes = withoutActivityLinks(entry?.notes);
     if (!subject) missing.push(`Entrada ${number}: falta la asignatura.`);
     if (!event) missing.push(`Entrada ${number}: falta la clase o actividad.`);
 
     const mode = text(entry?.preparationMode);
-    let preparation;
-    if (mode === 'none') preparation = NO_ADDITIONAL_PREPARATION;
-    else if (mode === 'canvas' || mode === 'manual') {
-      preparation = text(entry?.preparation);
-      if (!preparation) missing.push(`Entrada ${number}: falta indicar la preparación o elegir «Sin trabajo adicional».`);
-    } else {
+    let preparation = mode === 'none' ? '' : withoutActivityLinks(entry?.preparation);
+    if (preparation && mode !== 'canvas' && mode !== 'manual') {
       missing.push(`Entrada ${number}: elige cómo indicar la preparación.`);
       preparation = '';
     }
 
     const label = `${subject || `{{asignatura_${number}}}`} — ${event || `{{actividad_${number}}}`}${teacher ? `, con ${teacher}` : ''}`;
-    const work = preparation ? sentence(preparation) : `{{preparacion_${number}}}`;
-    return `• ${label}:${schedule ? `\n  ${schedule.replace(/\n/g, '\n  ')}\n  ` : ' '}${work}${notes ? `\n  ${notes.replace(/\n/g, '\n  ')}` : ''}`;
+    const work = preparation ? sentence(preparation) : '';
+    const details = [schedule, work, notes].filter(Boolean);
+    if (!details.length) return `• ${label}`;
+    if (!schedule && work) return `• ${label}: ${work}${notes ? `\n  ${notes.replace(/\n/g, '\n  ')}` : ''}`;
+    return `• ${label}:\n  ${details.join('\n').replace(/\n/g, '\n  ')}`;
   });
 
   return { text: paragraphs.join('\n\n'), missing, entryCount: items.length };

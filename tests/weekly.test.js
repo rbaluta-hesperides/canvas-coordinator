@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createWeeklyEntry, composeWeeklyAgenda, NO_ADDITIONAL_PREPARATION } from '../src/weekly.js';
+import { createWeeklyEntry, composeWeeklyAgenda } from '../src/weekly.js';
 
 const course = {
   id: 'course-a', name: 'Econometría', subject: 'Econometría',
@@ -38,17 +38,17 @@ test('weekly entries use the subject name without Canvas academic codes', () => 
   assert.equal(createWeeklyEntry().subject, '');
 });
 
-test('unknown preparation is incomplete until explicitly marked as no additional work', () => {
+test('unknown or deliberately omitted preparation produces no filler or missing-field error', () => {
   const entry = createWeeklyEntry(course, 'live-1');
   assert.equal(entry.preparationMode, 'manual');
   assert.equal(entry.preparation, '');
-  assert.equal(composeWeeklyAgenda([entry]).missing.length, 1);
+  assert.deepEqual(composeWeeklyAgenda([entry]).missing, []);
+  assert.equal(composeWeeklyAgenda([entry]).text, '• Econometría — Clase sincrónica 1');
   const declaredNone = { ...entry, preparationMode: 'none', preparation: 'Old cutoff must not leak.' };
   const result = composeWeeklyAgenda([declaredNone]);
   assert.deepEqual(result.missing, []);
-  assert.match(result.text, /No hay sesiones adicionales que trabajar antes de esta clase\./);
+  assert.equal(result.text, '• Econometría — Clase sincrónica 1');
   assert.ok(!result.text.includes('Old cutoff'));
-  assert.equal(NO_ADDITIONAL_PREPARATION, 'No hay sesiones adicionales que trabajar antes de esta clase.');
 });
 
 test('no course, no selection, stale selection, tutoring and exams never invent Canvas coverage', () => {
@@ -99,13 +99,14 @@ test('generated activities are chronological while repeated subjects and manual 
 });
 
 test('sorting generated entries keeps validation references tied to the original editor rows', () => {
-  const late = { ...createWeeklyEntry(course), generated: true, event: 'Examen domingo', date: '2026-10-11', startTime: '09:00' };
+  const late = { ...createWeeklyEntry(course), generated: true, subject: '', event: 'Examen domingo', date: '2026-10-11', startTime: '09:00' };
   const early = { ...createWeeklyEntry(course, 'live-2'), generated: true, sortAt: '2026-10-05T18:00:00' };
   const result = composeWeeklyAgenda([late, early]);
   assert.equal(result.missing.length, 1);
-  assert.match(result.missing[0], /^Entrada 1: falta indicar la preparación/);
+  assert.match(result.missing[0], /^Entrada 1: falta la asignatura/);
   assert.ok(result.text.indexOf('Clase sincrónica 2') < result.text.indexOf('Examen domingo'));
-  assert.match(result.text, /Examen domingo: \{\{preparacion_1\}\}/);
+  assert.match(result.text, /\{\{asignatura_1\}\} — Examen domingo/);
+  assert.doesNotMatch(result.text, /preparacion_1/);
 });
 
 test('editing calendar preparation does not prevent a rescheduled activity from moving chronologically', () => {
@@ -118,16 +119,15 @@ test('editing calendar preparation does not prevent a rescheduled activity from 
   assert.equal(edited.generated, false);
 });
 
-test('incomplete entries identify each missing field and cannot silently become sendable', () => {
+test('subject and activity remain required while preparation is optional', () => {
   const result = composeWeeklyAgenda([{ subject: '  ', event: null, preparationMode: 'manual' },
     { subject: 'Historia', event: 'Clase', preparationMode: 'canvas', preparation: '   ' }]);
-  assert.equal(result.missing.length, 4);
+  assert.equal(result.missing.length, 2);
   assert.match(result.missing[0], /Entrada 1.*asignatura/);
   assert.match(result.missing[1], /Entrada 1.*actividad/);
-  assert.match(result.missing[3], /Entrada 2.*preparación/);
-  assert.match(result.text, /\{\{asignatura_1\}\} — \{\{actividad_1\}\}: \{\{preparacion_1\}\}/);
+  assert.match(result.text, /\{\{asignatura_1\}\} — \{\{actividad_1\}\}/);
   assert.ok(!result.text.includes('undefined'));
-  assert.equal(composeWeeklyAgenda([null]).missing.length, 3);
+  assert.equal(composeWeeklyAgenda([null]).missing.length, 2);
   assert.equal(composeWeeklyAgenda([{ subject: 'Historia', event: 'Clase', preparationMode: 'unexpected', preparation: 'Do not assume this is valid.' }]).missing.length, 1);
 });
 
@@ -149,4 +149,21 @@ test('an empty or invalid agenda requires at least one class or activity', () =>
     assert.equal(result.missing.length, 1);
     assert.match(result.missing[0], /al menos una clase o actividad/);
   }
+});
+
+
+test('activities retain their timetable while links and absent preparation are omitted', () => {
+  const entry = { ...createWeeklyEntry(course), event: 'Tutoría', scheduleLabel: 'Lunes · 18:00–19:00',
+    preparation: 'https://canvas.example.edu/preparation', notes: 'https://canvas.example.edu/event' };
+  const result = composeWeeklyAgenda([entry]);
+  assert.deepEqual(result.missing, []);
+  assert.equal(result.text, '• Econometría — Tutoría:\n  Lunes · 18:00–19:00');
+  assert.doesNotMatch(result.text, /https?:|No hay|preparaci[oó]n|\{\{/);
+  assert.equal(entry.notes, 'https://canvas.example.edu/event');
+  const withNotes = composeWeeklyAgenda([{ ...entry, preparation: 'Repasar las sesiones 1 a 14.',
+    notes: 'Traed calculadora.\n\nhttps://canvas.example.edu/exam\n\nConsultad la convocatoria.' }]);
+  assert.match(withNotes.text, /sesiones 1 a 14/);
+  assert.match(withNotes.text, /Traed calculadora/);
+  assert.match(withNotes.text, /Consultad la convocatoria/);
+  assert.doesNotMatch(withNotes.text, /https?:/);
 });
